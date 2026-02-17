@@ -68,6 +68,45 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 
 ---
 
+## 🛠️ 辅助脚本
+
+### 列出对话与 ID（peer_id）
+
+`source_chat` / `relay.dest_channels` 使用的是 Telethon 的 `peer_id`（频道/超群常见为 `-100...`）。
+
+```bash
+# 打印列表（默认仅频道/群）
+docker compose run --rm userbot python scripts/list_dialogs.py
+
+# 额外导出为 JSON（供 config_wizard 选择）
+docker compose run --rm userbot python scripts/list_dialogs.py --json dialogs.json
+
+# 或本地：
+python scripts/list_dialogs.py --json dialogs.json
+
+# 如果你还没生成 config.json，可以用参数/环境变量提供 api_id/api_hash：
+# API_ID=123 API_HASH=xxx python scripts/list_dialogs.py
+# 或：python scripts/list_dialogs.py --api-id 123 --api-hash xxx
+```
+
+### 交互生成 config.json / .env
+
+```bash
+docker compose run --rm userbot python scripts/config_wizard.py --dialogs dialogs.json
+# 或本地：
+python scripts/config_wizard.py --dialogs dialogs.json
+```
+
+---
+
+## 🔐 权限/注意事项
+
+- Userbot 账号需要能访问所有 `source_chat`（私有频道/群需先加入）。
+- RelayBot 对 `relay.dest_channels` 里的目标频道通常需要管理员权限（至少允许发送消息/媒体）。
+- 首次使用请先对 `target_bot` 发送 `/start`，确保能收到私聊消息。
+
+---
+
 ## 🧪 本地验证
 
 ```bash
