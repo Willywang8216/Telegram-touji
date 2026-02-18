@@ -10,12 +10,18 @@ By default it prints only channels/groups. Use --all to include users/bots.
 
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_repo_root = str(Path(__file__).resolve().parents[1])
+if _repo_root not in sys.path:
+    sys.path.insert(0, _repo_root)
+
 import argparse
 import asyncio
 import json
 import os
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from telethon import TelegramClient, utils

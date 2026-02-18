@@ -35,6 +35,31 @@ python scripts/config_wizard.py
 docker compose up -d --build
 ```
 
+> 注意：请先 `cd` 到**仓库根目录**再运行 `docker compose ...`。如果你在 `~` 等其他目录运行，可能会把巨大目录作为 build context 发送到 Docker，导致构建很慢甚至出现 `permission denied`。
+
+## Configuration FAQ
+
+### `MASTER_ACCOUNT_ID` 是什么？
+是你的 **Telegram 账号的数字 user id**。该账号可以私聊 userbot 来执行 `/join` `/leave` `/add_listen` 等指令。
+获取方式：运行 `scripts/list_dialogs.py` 后会打印 `my_user_id=...`，把这个值填入即可（或者用 `@userinfobot` 获取）。
+
+### `RELAY_API_ID` / `RELAY_API_HASH` 是什么？可以和 `API_ID` / `API_HASH` 一样吗？
+它们也是 Telegram 的 MTProto App 凭证（来自 https://my.telegram.org）。
+**可以直接复用同一组** `API_ID` / `API_HASH`（本项目默认也是这么用的）。
+
+### `RELAY_DEST_CHANNELS` 如何写多个？
+用**逗号分隔**的目标频道/群 `peer_id`（通常是 `-100...`），例如：
+
+```bash
+RELAY_DEST_CHANNELS=-1001111111111,-1002222222222,-1003333333333
+```
+
+> 注意：本项目当前实现里 `RELAY_DEST_CHANNELS` 只能是**数字 ID**（不能用 `@channelname`）。
+
+### 能否做到“不同源频道 → 不同目标频道”？
+当前版本不支持：relaybot 会把所有消息广播到 `RELAY_DEST_CHANNELS` 里的全部目标。
+如果你需要按源频道分别路由（你的 A/B/C/D 映射需求），需要进一步改造代码（我可以下一步帮你加上）。
+
 ---
 
 ## 🛠️ 列出对话 ID（peer_id）
