@@ -1,4 +1,3 @@
-version: '3'
 services:
   # 服务1: 用户机器人 (负责从源频道偷消息 -> 发给机器人)
   userbot:
@@ -8,10 +7,10 @@ services:
     volumes:
       - ./:/app
     command: python telegram_bot.py
+    # Note: .env is loaded by ConfigManager inside the app; we intentionally do not use env_file
+    # so `docker compose up` works even if .env is missing.
     environment:
-      - TZ=Asia/Shanghai
-    env_file:
-      - .env
+      - TZ=${TZ:-Asia/Shanghai}
     stdin_open: true
     tty: true
 
@@ -23,7 +22,6 @@ services:
     volumes:
       - ./:/app
     command: python bot_relay.py
+    # Note: .env is loaded by ConfigManager inside the app; we intentionally do not use env_file.
     environment:
-      - TZ=Asia/Shanghai
-    env_file:
-      - .env
+      - TZ=${TZ:-Asia/Shanghai}

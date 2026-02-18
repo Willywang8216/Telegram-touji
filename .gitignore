@@ -1,0 +1,18 @@
+# Secrets
+.env
+config.json
+
+# Telethon sessions
+*.session
+*.session-journal
+
+# Generated outputs
+dialogs.json
+logs/
+
+# Python
+__pycache__/
+*.pyc
+
+# OS
+.DS_Store
