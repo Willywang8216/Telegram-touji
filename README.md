@@ -56,9 +56,12 @@ RELAY_DEST_CHANNELS=-1001111111111,-1002222222222,-1003333333333
 
 > 注意：本项目当前实现里 `RELAY_DEST_CHANNELS` 只能是**数字 ID**（不能用 `@channelname`）。
 
-### 能否做到“不同源频道 → 不同目标频道”？
-当前版本不支持：relaybot 会把所有消息广播到 `RELAY_DEST_CHANNELS` 里的全部目标。
-如果你需要按源频道分别路由（你的 A/B/C/D 映射需求），需要进一步改造代码（我可以下一步帮你加上）。
+### 能否做到“不同源频道 → 不同目标频道 / Topics”？
+支持。你可以在 `config.json` 的 `relay.routes` 里按源频道（peer_id）配置不同的目标：
+- 不同目标频道/群
+- 或者路由到某个 Supergroup 的 **Topic**（通过 `topic` 标题；不存在会尝试自动创建）
+
+`RELAY_DEST_CHANNELS` 仍然保留为“全量广播/兜底”的旧用法。
 
 ---
 
@@ -74,6 +77,19 @@ docker compose run --rm userbot python scripts/list_dialogs.py --json dialogs.js
 # 临时传入 api_id/api_hash（无需 .env/config.json）
 docker compose run --rm -e API_ID=123 -e API_HASH=xxxx userbot \
   python scripts/list_dialogs.py --json dialogs.json
+```
+
+## 🧵 列出某个群的 Topics（论坛话题）
+
+> 注意：Topics 只存在于 **开启了 Topics 的 Supergroup（论坛群）**。
+>
+> `scripts/list_dialogs.py` 不会显示 topics，因为 topics 不是“对话（dialog）”，需要单独查询。
+
+```bash
+docker compose run --rm userbot python scripts/list_topics.py --peer -1001234567890
+
+# 导出为 JSON
+docker compose run --rm userbot python scripts/list_topics.py --peer -1001234567890 --json topics.json
 ```
 
 ---

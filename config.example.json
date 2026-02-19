@@ -5,14 +5,24 @@
   "bot_mappings": [
     {
       "source_chat": -1001234567890,
-      "target_bot": "@your_middle_bot"
+      "target_bot": "@your_relay_bot"
     }
   ],
   "relay": {
     "api_id": 12345678,
     "api_hash": "your_api_hash",
     "bot_token": "123456:ABCDEF_your_bot_token",
-    "dest_channels": [-1009876543210]
+
+    "dest_channels": [-1009876543210],
+
+    "default_dest_channels": [],
+    "routes": [
+      {
+        "sources": [-1001234567890],
+        "dest_chat": -1009876543210,
+        "topic": "Example Topic"
+      }
+    ]
   },
   "proxy": null
 }
