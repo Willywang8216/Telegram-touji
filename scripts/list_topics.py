@@ -1,6 +1,11 @@
 import argparse
 import asyncio
 import json
+import sys
+from pathlib import Path
+
+# Ensure repo root is on sys.path when running as `python scripts/xxx.py`
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from telethon import TelegramClient, functions
 
