@@ -89,21 +89,23 @@ def _topic_title_variants(title: str) -> list[str]:
 
 async def _resolve_topic_top_message(client: TelegramClient, chat_id: int, title: str) -> int | None:
     entity = await client.get_entity(chat_id)
-    res = await client(
-        functions.messages.GetForumTopicsRequest(
-            peer=entity,
-            offset_date=None,
-            offset_id=0,
-            offset_topic=0,
-            limit=100,
-            q="",
-        )
-    )
 
-    by_title = {t.title: int(t.top_message) for t in res.topics}
-    for v in _topic_title_variants(title):
-        if v in by_title and by_title[v] > 0:
-            return int(by_title[v])
+    for q in _topic_title_variants(title):
+        res = await client(
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
+                offset_date=None,
+                offset_id=0,
+                offset_topic=0,
+                limit=50,
+                q=str(q),
+            )
+        )
+
+        for t in list(res.topics):
+            if t.title == title or t.title == str(q):
+                if int(t.top_message) > 0:
+                    return int(t.top_message)
 
     return None
 
@@ -315,25 +317,28 @@ async def run_once(
                 continue
             topic.top_message = int(tm)
 
-        try:
-            have = await _count_today_messages(
-                client,
-                topic,
-                day_start_utc=day_start_utc,
-                need=min_posts_per_topic_per_day,
-            )
-        except TopicInvalidError:
-            tm = await _resolve_topic_top_message(client, topic.chat_id, topic.title)
-            if not tm or int(tm) == int(topic.top_message):
-                print(f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r} top_message={topic.top_message}")
-                continue
-            topic.top_message = int(tm)
-            have = await _count_today_messages(
-                client,
-                topic,
-                day_start_utc=day_start_utc,
-                need=min_posts_per_topic_per_day,
-            )
+        have = None
+        for _ in range(2):
+            try:
+                have = await _count_today_messages(
+                    client,
+                    topic,
+                    day_start_utc=day_start_utc,
+                    need=min_posts_per_topic_per_day,
+                )
+                break
+            except TopicInvalidError:
+                tm = await _resolve_topic_top_message(client, topic.chat_id, topic.title)
+                if not tm or int(tm) == int(topic.top_message):
+                    print(
+                        f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r} top_message={topic.top_message}"
+                    )
+                    have = None
+                    break
+                topic.top_message = int(tm)
+
+        if have is None:
+            continue
 
         missing = max(0, int(min_posts_per_topic_per_day) - int(have))
         if missing <= 0:
@@ -342,8 +347,17 @@ async def run_once(
         try:
             await _scan_candidates(client, conn, topic, batch_size=scan_batch, max_total=max_scan_per_topic)
         except TopicInvalidError:
-            print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-            continue
+            tm = await _resolve_topic_top_message(client, topic.chat_id, topic.title)
+            if tm and int(tm) != int(topic.top_message):
+                topic.top_message = int(tm)
+                try:
+                    await _scan_candidates(client, conn, topic, batch_size=scan_batch, max_total=max_scan_per_topic)
+                except TopicInvalidError:
+                    print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+                    continue
+            else:
+                print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+                continue
 
         for _ in range(missing):
             if posted >= max_posts_per_run:
@@ -359,8 +373,17 @@ async def run_once(
                 await asyncio.sleep(int(e.seconds) + 1)
                 await _repost_message(client, topic, pick)
             except TopicInvalidError:
-                print(f"skip topic (send TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-                break
+                tm = await _resolve_topic_top_message(client, topic.chat_id, topic.title)
+                if tm and int(tm) != int(topic.top_message):
+                    topic.top_message = int(tm)
+                    try:
+                        await _repost_message(client, topic, pick)
+                    except TopicInvalidError:
+                        print(f"skip topic (send TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+                        break
+                else:
+                    print(f"skip topic (send TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+                    break
 
             _mark_used(conn, topic, pick, now_ts=now_ts)
             posted += 1

@@ -8,8 +8,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from telethon import TelegramClient, functions, types
+from telethon.errors.rpcbaseerrors import BadRequestError
 
 from common_config import ConfigManager, load_userbot_settings
+
+
+def _topic_title_variants(title: str) -> list[str]:
+    if not title:
+        return []
+
+    t = str(title)
+    out = [t]
+
+    # If config topic names have a leading emoji ("🍑 Foo"), allow matching old titles.
+    if " " in t:
+        first, rest = t.split(" ", 1)
+        if len(first) <= 8 and rest:
+            out.append(rest)
+
+    return out
 
 
 async def list_topics(client: TelegramClient, peer):
@@ -25,6 +42,27 @@ async def list_topics(client: TelegramClient, peer):
         )
     )
     return entity, list(res.topics)
+
+
+async def find_topic(client: TelegramClient, peer, title: str):
+    entity = await client.get_entity(peer)
+
+    for q in _topic_title_variants(title):
+        res = await client(
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
+                offset_date=None,
+                offset_id=0,
+                offset_topic=0,
+                limit=50,
+                q=str(q),
+            )
+        )
+        for t in list(res.topics):
+            if t.title == title or t.title == str(q):
+                return entity, t
+
+    return entity, None
 
 
 async def _default_topic_icon_ids(client: TelegramClient) -> dict[str, int]:
@@ -52,23 +90,32 @@ async def _default_topic_icon_ids(client: TelegramClient) -> dict[str, int]:
     return out
 
 
+def _is_topic_not_modified(exc: Exception) -> bool:
+    return "topic_not_modified" in str(exc).lower()
+
+
 async def apply_topic_renames(client: TelegramClient, peer, renames: dict[str, str]) -> None:
     if not renames:
         return
 
-    entity, topics = await list_topics(client, peer)
-    by_title = {t.title: t for t in topics}
-
     for old, new in renames.items():
         if not old or not new or old == new:
             continue
-        if old not in by_title:
-            continue
-        if new in by_title:
+
+        entity, topic = await find_topic(client, peer, str(old))
+        if not topic:
             continue
 
-        t = by_title[old]
-        await client(functions.messages.EditForumTopicRequest(peer=entity, topic_id=int(t.id), title=str(new)))
+        _, new_topic = await find_topic(client, peer, str(new))
+        if new_topic:
+            continue
+
+        try:
+            await client(functions.messages.EditForumTopicRequest(peer=entity, topic_id=int(topic.id), title=str(new)))
+        except BadRequestError as exc:
+            if _is_topic_not_modified(exc):
+                continue
+            raise
 
 
 async def apply_topic_icons(
@@ -82,14 +129,11 @@ async def apply_topic_icons(
     if not default_icon_ids:
         return
 
-    entity, topics = await list_topics(client, peer)
-    by_title = {t.title: t for t in topics}
-
     for title, emoji in topic_icon_emojis.items():
         if not title or not emoji:
             continue
 
-        t = by_title.get(str(title))
+        entity, t = await find_topic(client, peer, str(title))
         if not t:
             continue
 
@@ -97,13 +141,18 @@ async def apply_topic_icons(
         if not icon_id:
             continue
 
-        await client(
-            functions.messages.EditForumTopicRequest(
-                peer=entity,
-                topic_id=int(t.id),
-                icon_emoji_id=int(icon_id),
+        try:
+            await client(
+                functions.messages.EditForumTopicRequest(
+                    peer=entity,
+                    topic_id=int(t.id),
+                    icon_emoji_id=int(icon_id),
+                )
             )
-        )
+        except BadRequestError as exc:
+            if _is_topic_not_modified(exc):
+                continue
+            raise
 
 
 async def ensure_topics(
@@ -116,11 +165,17 @@ async def ensure_topics(
     topic_icon_emojis = topic_icon_emojis or {}
     default_icon_ids = default_icon_ids or {}
 
-    entity, topics = await list_topics(client, peer)
-    existing = {t.title: t.top_message for t in topics}
-    missing = [t for t in titles if t not in existing]
+    out: dict[str, int] = {}
 
-    for title in missing:
+    for title in titles:
+        if not title:
+            continue
+
+        entity, existing_topic = await find_topic(client, peer, str(title))
+        if existing_topic:
+            out[str(title)] = int(existing_topic.top_message)
+            continue
+
         icon_emoji_id = None
         emoji = topic_icon_emojis.get(str(title))
         if emoji:
@@ -135,11 +190,11 @@ async def ensure_topics(
             )
         )
 
-    if missing:
-        _, topics = await list_topics(client, peer)
-        existing = {t.title: t.top_message for t in topics}
+        _, created = await find_topic(client, peer, str(title))
+        if created:
+            out[str(title)] = int(created.top_message)
 
-    return existing
+    return out
 
 
 async def main():
