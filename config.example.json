@@ -42,7 +42,13 @@
     "blocklist_substrings": [
       "全球最快VPN",
       "网黄尊享"
-    ]
+    ],
+
+    "blocklist_regexes": [
+      "\\b(?:usdt|btc|eth)\\b"
+    ],
+    "block_contact_ads": true,
+    "fallback_to_general_topic": false
   },
   "proxy": null
 }

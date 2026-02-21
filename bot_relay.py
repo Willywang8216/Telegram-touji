@@ -6,6 +6,7 @@ from telethon.tl.types import PeerChannel
 
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from message_filter import should_block_text
 from structured_logger import get_logger, log_event
 
 logger = get_logger("relaybot")
@@ -132,25 +133,6 @@ async def _source_title(source_peer_id: int | None, msg) -> str | None:
         return getattr(ent, "title", None) or getattr(ent, "username", None)
     except Exception:  # noqa: BLE001
         return str(source_peer_id)
-
-
-def _should_skip_text(text: str, blocklist_substrings: list[str]) -> bool:
-    if not text:
-        return False
-
-    text_norm = str(text).lower()
-    text_compact = "".join(text_norm.split())
-
-    for needle in blocklist_substrings:
-        if not needle:
-            continue
-        n = str(needle).lower()
-        if n in text_norm:
-            return True
-        if "".join(n.split()) in text_compact:
-            return True
-
-    return False
 
 
 def _is_send_videos_forbidden(exc: Exception) -> bool:
@@ -299,6 +281,11 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
             log_event(logger, logging.ERROR, "topic_lookup_failed", chat_id=chat_id, title=str(topic_title), error=str(exc))
             reply_to = None
 
+        s = current_settings()
+        if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
+            log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
+            return
+
     s = current_settings()
     if s.get("strip_text"):
         caption = ""
@@ -347,7 +334,14 @@ async def handler(event):
     s = current_settings()
     blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
 
-    if _should_skip_text(_strip_source_marker(_raw_message_text(event.message)), blocklist):
+    filter_text = _strip_source_marker(_raw_message_text(event.message))
+    if should_block_text(
+        filter_text,
+        blocklist_substrings=blocklist,
+        blocklist_regexes=s.get("blocklist_regexes") or [],
+        block_contact_ads=bool(s.get("block_contact_ads", True)),
+        contact_ad_keywords=s.get("contact_ad_keywords"),
+    ):
         log_event(logger, logging.INFO, "message_blocked", reason="blocklist", message_id=event.message.id)
         return
 
@@ -380,7 +374,15 @@ async def process_media_group(gid: int):
 
         s = current_settings()
         blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
-        if _should_skip_text(_strip_source_marker((original_caption or "").strip()), blocklist):
+
+        album_text = "\n".join([_strip_source_marker(_raw_message_text(m)) for m in msgs if _raw_message_text(m)])
+        if should_block_text(
+            album_text,
+            blocklist_substrings=blocklist,
+            blocklist_regexes=s.get("blocklist_regexes") or [],
+            block_contact_ads=bool(s.get("block_contact_ads", True)),
+            contact_ad_keywords=s.get("contact_ad_keywords"),
+        ):
             log_event(logger, logging.INFO, "album_blocked", reason="blocklist", group_id=gid)
             return
 
@@ -419,6 +421,10 @@ async def process_media_group(gid: int):
                         error=str(exc),
                     )
                     reply_to = None
+
+                if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
+                    log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
+                    continue
 
             await rate_limiter.wait()
             try:
@@ -469,8 +475,11 @@ async def ensure_forum_topics_on_startup():
         chat_id = int(item.get("chat_id"))
         for title in item.get("topics", []) or []:
             try:
-                await _get_forum_topic_top_message(chat_id, str(title))
-                log_event(logger, logging.INFO, "topic_ensured", chat_id=chat_id, title=str(title))
+                top = await _get_forum_topic_top_message(chat_id, str(title))
+                if top:
+                    log_event(logger, logging.INFO, "topic_ensured", chat_id=chat_id, title=str(title), top_message=int(top))
+                else:
+                    log_event(logger, logging.WARNING, "topic_ensure_skipped", chat_id=chat_id, title=str(title), reason="unavailable")
             except Exception as exc:  # noqa: BLE001
                 log_event(logger, logging.ERROR, "topic_ensure_failed", chat_id=chat_id, title=str(title), error=str(exc))
 

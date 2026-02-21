@@ -143,6 +143,7 @@
     "bot_token": "",
 
     "strip_text": true,
+    "fallback_to_general_topic": false,
 
     "dest_channels": [-1002350290734, -1002349398833],
     "default_destinations": [

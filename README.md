@@ -60,7 +60,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
   - `by: "source"`：按来源 peer_id 分流（同一来源更稳定）
 - `strip_text`: 是否清空原始文字/广告（默认 `true`）
 - `blocklist_substrings`: 命中任意子串则丢弃消息（用于过滤诈骗/广告）
-- `ensure_forum_topics`: 启动时预创建一些 topics
+- `blocklist_regexes`: 正则命中则丢弃消息（大小写不敏感）
+- `block_contact_ads`: 是否启用“私信/下单/@xxx/t.me”等联系方式广告过滤（默认 true）
+- `contact_ad_keywords`: 自定义联系方式广告关键词（可选）
+- `fallback_to_general_topic`: topic 无法解析时是否降级发送到“General”里（默认 true；推荐设为 false 避免污染）
+- `ensure_forum_topics`: 用于 scripts/sync_forum_topics.py 预创建 topics 并写入映射
 - `forum_topic_top_messages`: 手动提供 topic 标题 -> top_message 映射（用于把消息投递到指定 topic）
   - 由于 Telegram 对 bot 的 MTProto 接口有限制，bot 账号在部分环境下无法调用 `GetForumTopicsRequest` 获取 topic 列表；此时需要用 userbot 生成映射并写入配置。
   - 生成/写入映射：

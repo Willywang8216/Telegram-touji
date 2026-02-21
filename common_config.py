@@ -103,6 +103,12 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     routes = relay.get("routes", [])
     strip_text = bool(relay.get("strip_text", True))
     blocklist_substrings = relay.get("blocklist_substrings", [])
+    blocklist_regexes = relay.get("blocklist_regexes", [])
+    block_contact_ads = bool(relay.get("block_contact_ads", True))
+    contact_ad_keywords = relay.get("contact_ad_keywords")
+
+    fallback_to_general_topic = bool(relay.get("fallback_to_general_topic", True))
+
     ensure_forum_topics = relay.get("ensure_forum_topics", [])
     forum_topic_top_messages = relay.get("forum_topic_top_messages", {})
 
@@ -118,6 +124,10 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "routes": routes,
         "strip_text": strip_text,
         "blocklist_substrings": blocklist_substrings,
+        "blocklist_regexes": blocklist_regexes,
+        "block_contact_ads": block_contact_ads,
+        "contact_ad_keywords": contact_ad_keywords,
+        "fallback_to_general_topic": fallback_to_general_topic,
         "ensure_forum_topics": ensure_forum_topics,
         "forum_topic_top_messages": forum_topic_top_messages,
     }
