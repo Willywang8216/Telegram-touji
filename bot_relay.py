@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-from telethon import TelegramClient, events, functions, utils
+from telethon import TelegramClient, events, functions, types, utils
 from telethon.tl.types import PeerChannel
 
 from common_config import ConfigManager, load_relay_settings
@@ -139,6 +139,23 @@ def _is_send_videos_forbidden(exc: Exception) -> bool:
     return "chat_send_videos_forbidden" in str(exc).lower()
 
 
+def _topic_title_variants(title: str) -> list[str]:
+    if not title:
+        return []
+
+    t = str(title)
+    out = [t]
+
+    # If config got updated to add a leading emoji ("🍑 Foo") but the mapping
+    # still uses the old title ("Foo"), try a fallback.
+    if " " in t:
+        first, rest = t.split(" ", 1)
+        if len(first) <= 8 and rest:
+            out.append(rest)
+
+    return out
+
+
 def _preconfigured_topic_top_message(chat_id: int, title: str) -> int | None:
     s = current_settings()
     mapping = s.get("forum_topic_top_messages") or {}
@@ -152,10 +169,12 @@ def _preconfigured_topic_top_message(chat_id: int, title: str) -> int | None:
     if not isinstance(chat_map, dict):
         return None
 
-    value = chat_map.get(title)
-    if value is None:
-        return None
-    return int(value)
+    for variant in _topic_title_variants(title):
+        value = chat_map.get(variant)
+        if value is not None:
+            return int(value)
+
+    return None
 
 
 async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
@@ -294,13 +313,17 @@ async def _send_to_destination(
     else:
         caption = _strip_source_marker(_raw_message_text(msg))
 
-    if msg.media is None and not caption:
+    media = msg.media
+    if isinstance(media, types.MessageMediaWebPage):
+        media = None
+
+    if media is None and not caption:
         return False
 
     await rate_limiter.wait()
     try:
         await with_retry(
-            lambda: client.send_message(chat_id, message=caption, file=msg.media, reply_to=reply_to),
+            lambda: client.send_message(chat_id, message=caption, file=media, reply_to=reply_to),
             retries=3,
             base_delay=1,
             logger=logger,
@@ -308,9 +331,9 @@ async def _send_to_destination(
         )
         return True
     except Exception as exc:  # noqa: BLE001
-        if msg.media is not None and _is_send_videos_forbidden(exc):
+        if media is not None and _is_send_videos_forbidden(exc):
             await with_retry(
-                lambda: client.send_file(chat_id, msg.media, caption=caption, reply_to=reply_to, force_document=True),
+                lambda: client.send_file(chat_id, media, caption=caption, reply_to=reply_to, force_document=True),
                 retries=3,
                 base_delay=1,
                 logger=logger,
@@ -373,7 +396,7 @@ async def process_media_group(gid: int):
             del media_group_cache[gid]
 
         msgs.sort(key=lambda x: x.id)
-        media = [m.media for m in msgs]
+        media = [m.media for m in msgs if m.media is not None and not isinstance(m.media, types.MessageMediaWebPage)]
         original_caption = next((_raw_message_text(m) for m in msgs if _raw_message_text(m)), "")
 
         s = current_settings()
