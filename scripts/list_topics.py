@@ -1,8 +1,7 @@
 import argparse
 import asyncio
 
-from telethon import TelegramClient
-from telethon.tl.functions.channels import GetForumTopicsRequest
+from telethon import TelegramClient, functions
 
 from common_config import ConfigManager, load_userbot_settings
 
@@ -27,8 +26,8 @@ async def main():
 
         entity = await client.get_entity(peer)
         res = await client(
-            GetForumTopicsRequest(
-                channel=entity,
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
                 offset_date=None,
                 offset_id=0,
                 offset_topic=0,

@@ -55,7 +55,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `relay.routes`: 按 `source_chat` 精确匹配来源的路由规则
 - `topic_title`: 目标 topic 标题（不存在会自动创建）
 - `topic_from_source`: 为 true 时，自动使用“来源频道/群标题”作为 topic 名（不存在会自动创建）
-- `bucket_topics`: 自动分流到桶（按来源 peer_id 取模），例如 `{"prefix": "Asian Porn ", "count": 5}` 会投递到 `Asian Porn 1..5`
+- `bucket_topics`: 自动分流到桶，例如 `{"prefix": "Asian Porn ", "count": 5, "by": "message"}` 会投递到 `Asian Porn 1..5`
+  - `by: "message"`：按每条消息分流（更平均）
+  - `by: "source"`：按来源 peer_id 分流（同一来源更稳定）
 - `strip_text`: 是否清空原始文字/广告（默认 `true`）
 - `blocklist_substrings`: 命中任意子串则丢弃消息（用于过滤诈骗/广告）
 - `ensure_forum_topics`: 启动时预创建一些 topics

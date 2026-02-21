@@ -1,8 +1,7 @@
 import asyncio
 import logging
 
-from telethon import TelegramClient, events, utils
-from telethon.tl.functions.channels import CreateForumTopicRequest, GetForumTopicsRequest
+from telethon import TelegramClient, events, functions, utils
 from telethon.tl.types import PeerChannel
 
 from common_config import ConfigManager, load_relay_settings
@@ -13,7 +12,7 @@ logger = get_logger("relaybot")
 config_manager = ConfigManager()
 settings = load_relay_settings(config_manager)
 
-media_group_cache = {}
+media_group_cache: dict[int, dict] = {}
 media_group_lock = asyncio.Lock()
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/relay_dlq.jsonl"
@@ -35,6 +34,9 @@ BUILTIN_BLOCKLIST_SUBSTRINGS = [
     "TG必 极搜",
     "giveaway prizes",
 ]
+
+SRC_MARKER_PREFIX = "[[SRC:"
+SRC_MARKER_SUFFIX = "]]"
 
 
 def current_settings() -> dict:
@@ -63,10 +65,42 @@ def _normalize_destinations(destinations) -> list[dict]:
     return normalized
 
 
+def _raw_message_text(msg) -> str:
+    return (getattr(msg, "raw_text", None) or getattr(msg, "message", None) or "").strip()
+
+
+def _extract_source_peer_id_from_marker(text: str) -> int | None:
+    if not text:
+        return None
+    text = text.strip()
+    if not text.startswith(SRC_MARKER_PREFIX):
+        return None
+    end = text.find(SRC_MARKER_SUFFIX)
+    if end == -1:
+        return None
+    raw = text[len(SRC_MARKER_PREFIX) : end]
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _strip_source_marker(text: str) -> str:
+    if not text:
+        return ""
+    t = text.strip()
+    if not t.startswith(SRC_MARKER_PREFIX):
+        return text
+    end = t.find(SRC_MARKER_SUFFIX)
+    if end == -1:
+        return text
+    return t[end + len(SRC_MARKER_SUFFIX) :].lstrip()
+
+
 def _extract_source_peer_id(msg) -> int | None:
     hdr = getattr(msg, "fwd_from", None)
     if not hdr:
-        return None
+        return _extract_source_peer_id_from_marker(_raw_message_text(msg))
 
     from_id = getattr(hdr, "from_id", None)
     if from_id:
@@ -99,10 +133,6 @@ async def _source_title(source_peer_id: int | None, msg) -> str | None:
         return str(source_peer_id)
 
 
-def _raw_message_text(msg) -> str:
-    return (getattr(msg, "raw_text", None) or getattr(msg, "message", None) or "").strip()
-
-
 def _should_skip_text(text: str, blocklist_substrings: list[str]) -> bool:
     if not text:
         return False
@@ -123,8 +153,8 @@ async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
 
         entity = await client.get_entity(chat_id)
         res = await client(
-            GetForumTopicsRequest(
-                channel=entity,
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
                 offset_date=None,
                 offset_id=0,
                 offset_topic=0,
@@ -135,10 +165,10 @@ async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
         forum_topics_cache[chat_id] = {t.title: t.top_message for t in res.topics}
 
         if title not in forum_topics_cache[chat_id]:
-            await client(CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
+            await client(functions.channels.CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
             res = await client(
-                GetForumTopicsRequest(
-                    channel=entity,
+                functions.messages.GetForumTopicsRequest(
+                    peer=entity,
                     offset_date=None,
                     offset_id=0,
                     offset_topic=0,
@@ -178,7 +208,12 @@ def _bucket_topic_title(bucket_cfg: dict, source_peer_id: int | None, message_id
     if not prefix or count <= 0:
         return None
 
-    key = source_peer_id if source_peer_id is not None else message_id
+    mode = str(bucket_cfg.get("by") or bucket_cfg.get("mode") or "source").lower().strip()
+    if mode in {"message", "msg", "message_id", "msg_id"}:
+        key = message_id
+    else:
+        key = source_peer_id if source_peer_id is not None else message_id
+
     idx = (abs(int(key)) % count) + start
     return f"{prefix}{idx}"
 
@@ -206,7 +241,7 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
     if s.get("strip_text"):
         caption = ""
     else:
-        caption = _raw_message_text(msg)
+        caption = _strip_source_marker(_raw_message_text(msg))
 
     if msg.media is None and not caption:
         return
@@ -238,7 +273,7 @@ async def handler(event):
     s = current_settings()
     blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
 
-    if _should_skip_text(_raw_message_text(event.message), blocklist):
+    if _should_skip_text(_strip_source_marker(_raw_message_text(event.message)), blocklist):
         log_event(logger, logging.INFO, "message_blocked", reason="blocklist", message_id=event.message.id)
         return
 
@@ -271,15 +306,20 @@ async def process_media_group(gid: int):
 
         s = current_settings()
         blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
-        if _should_skip_text((original_caption or "").strip(), blocklist):
+        if _should_skip_text(_strip_source_marker((original_caption or "").strip()), blocklist):
             log_event(logger, logging.INFO, "album_blocked", reason="blocklist", group_id=gid)
             return
 
-        source_peer_id = _extract_source_peer_id(msgs[0])
+        source_peer_id = None
+        for m in msgs:
+            source_peer_id = _extract_source_peer_id(m)
+            if source_peer_id is not None:
+                break
+
         source_title = await _source_title(source_peer_id, msgs[0])
         destinations = _resolve_destinations_for_source(source_peer_id)
 
-        caption = "" if s.get("strip_text") else (original_caption or "")
+        caption = "" if s.get("strip_text") else _strip_source_marker(original_caption or "")
 
         for dest in destinations:
             chat_id = int(dest.get("chat_id"))
