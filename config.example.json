@@ -20,11 +20,17 @@
       {"chat_id": -1009876543210, "bucket_topics": {"prefix": "Bucket ", "count": 5, "by": "message"}}
     ],
 
+    "forum_topic_top_messages": {
+      "-1009876543210": {
+        "General": 123
+      }
+    },
+
     "routes": [
       {
         "source_chat": -1001234567890,
         "destinations": [
-          {"chat_id": -1009876543210, "topic_title": "Asian Porn"}
+          {"chat_id": -1009876543210, "topic_title": "General"}
         ]
       }
     ],

@@ -104,6 +104,7 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     strip_text = bool(relay.get("strip_text", True))
     blocklist_substrings = relay.get("blocklist_substrings", [])
     ensure_forum_topics = relay.get("ensure_forum_topics", [])
+    forum_topic_top_messages = relay.get("forum_topic_top_messages", {})
 
     if not api_id or not api_hash or not bot_token or (not default_destinations and not routes):
         raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/(default_destinations|routes)")
@@ -118,4 +119,5 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "strip_text": strip_text,
         "blocklist_substrings": blocklist_substrings,
         "ensure_forum_topics": ensure_forum_topics,
+        "forum_topic_top_messages": forum_topic_top_messages,
     }

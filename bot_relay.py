@@ -21,6 +21,7 @@ client = TelegramClient("bot_session", settings["api_id"], settings["api_hash"])
 
 forum_topics_lock = asyncio.Lock()
 forum_topics_cache: dict[int, dict[str, int]] = {}
+topic_api_disabled_chats: set[int] = set()
 
 BUILTIN_BLOCKLIST_SUBSTRINGS = [
     "Ban:  各类rush有货",
@@ -142,8 +143,38 @@ def _should_skip_text(text: str, blocklist_substrings: list[str]) -> bool:
     return False
 
 
+def _is_send_videos_forbidden(exc: Exception) -> bool:
+    return "chat_send_videos_forbidden" in str(exc).lower()
+
+
+def _preconfigured_topic_top_message(chat_id: int, title: str) -> int | None:
+    s = current_settings()
+    mapping = s.get("forum_topic_top_messages") or {}
+
+    chat_map = None
+    for key in (str(chat_id), chat_id):
+        if key in mapping:
+            chat_map = mapping.get(key)
+            break
+
+    if not isinstance(chat_map, dict):
+        return None
+
+    value = chat_map.get(title)
+    if value is None:
+        return None
+    return int(value)
+
+
 async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
     if not title:
+        return None
+
+    pre = _preconfigured_topic_top_message(chat_id, title)
+    if pre:
+        return pre
+
+    if chat_id in topic_api_disabled_chats:
         return None
 
     async with forum_topics_lock:
@@ -152,20 +183,41 @@ async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
             return cached
 
         entity = await client.get_entity(chat_id)
-        res = await client(
-            functions.messages.GetForumTopicsRequest(
-                peer=entity,
-                offset_date=None,
-                offset_id=0,
-                offset_topic=0,
-                limit=100,
-                q="",
+
+        try:
+            res = await client(
+                functions.messages.GetForumTopicsRequest(
+                    peer=entity,
+                    offset_date=None,
+                    offset_id=0,
+                    offset_topic=0,
+                    limit=100,
+                    q="",
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            if "cannot be executed as a bot" in msg or "bot users is restricted" in msg:
+                if chat_id not in topic_api_disabled_chats:
+                    log_event(logger, logging.WARNING, "topic_api_disabled", chat_id=chat_id, error=str(exc))
+                topic_api_disabled_chats.add(chat_id)
+                return None
+            raise
+
         forum_topics_cache[chat_id] = {t.title: t.top_message for t in res.topics}
 
         if title not in forum_topics_cache[chat_id]:
-            await client(functions.channels.CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
+            try:
+                await client(functions.channels.CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
+            except Exception as exc:  # noqa: BLE001
+                msg = str(exc).lower()
+                if "cannot be executed as a bot" in msg or "bot users is restricted" in msg:
+                    if chat_id not in topic_api_disabled_chats:
+                        log_event(logger, logging.WARNING, "topic_api_disabled", chat_id=chat_id, error=str(exc))
+                    topic_api_disabled_chats.add(chat_id)
+                    return None
+                raise
+
             res = await client(
                 functions.messages.GetForumTopicsRequest(
                     peer=entity,
@@ -247,13 +299,25 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
         return
 
     await rate_limiter.wait()
-    await with_retry(
-        lambda: client.send_message(chat_id, message=caption, file=msg.media, reply_to=reply_to),
-        retries=3,
-        base_delay=1,
-        logger=logger,
-        action="send_message",
-    )
+    try:
+        await with_retry(
+            lambda: client.send_message(chat_id, message=caption, file=msg.media, reply_to=reply_to),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="send_message",
+        )
+    except Exception as exc:  # noqa: BLE001
+        if msg.media is not None and _is_send_videos_forbidden(exc):
+            await with_retry(
+                lambda: client.send_file(chat_id, msg.media, caption=caption, reply_to=reply_to, force_document=True),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action="send_file_force_document",
+            )
+        else:
+            raise
 
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
@@ -357,9 +421,19 @@ async def process_media_group(gid: int):
                 )
                 log_event(logger, logging.INFO, "album_sent", chat_id=chat_id, group_id=gid)
             except Exception as exc:  # noqa: BLE001
-                payload = {"chat_id": chat_id, "group_id": gid, "error": str(exc)}
-                write_dlq(DLQ_PATH, payload)
-                log_event(logger, logging.ERROR, "album_send_failed", **payload)
+                if media and _is_send_videos_forbidden(exc):
+                    await with_retry(
+                        lambda: client.send_file(chat_id, media, caption=caption, reply_to=reply_to, force_document=True),
+                        retries=3,
+                        base_delay=1,
+                        logger=logger,
+                        action="send_album_force_document",
+                    )
+                    log_event(logger, logging.INFO, "album_sent_as_documents", chat_id=chat_id, group_id=gid)
+                else:
+                    payload = {"chat_id": chat_id, "group_id": gid, "error": str(exc)}
+                    write_dlq(DLQ_PATH, payload)
+                    log_event(logger, logging.ERROR, "album_send_failed", **payload)
     except asyncio.CancelledError:
         return
 

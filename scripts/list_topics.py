@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import json
 
 from telethon import TelegramClient, functions
 
@@ -9,6 +10,7 @@ from common_config import ConfigManager, load_userbot_settings
 async def main():
     parser = argparse.ArgumentParser(description="List forum topics in a supergroup")
     parser.add_argument("--peer", required=True, help="Peer ID (e.g. -100...) or @username")
+    parser.add_argument("--json", action="store_true", help="Output {title: top_message} as JSON")
     args = parser.parse_args()
 
     config_manager = ConfigManager()
@@ -35,6 +37,11 @@ async def main():
                 q="",
             )
         )
+
+        if args.json:
+            mapping = {t.title: int(t.top_message) for t in res.topics}
+            print(json.dumps(mapping, ensure_ascii=False, indent=2))
+            return
 
         for i, t in enumerate(res.topics, start=1):
             print(f"[{i}] id={t.id}  title={t.title}  top_message={t.top_message}")

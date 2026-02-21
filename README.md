@@ -61,6 +61,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `strip_text`: 是否清空原始文字/广告（默认 `true`）
 - `blocklist_substrings`: 命中任意子串则丢弃消息（用于过滤诈骗/广告）
 - `ensure_forum_topics`: 启动时预创建一些 topics
+- `forum_topic_top_messages`: 手动提供 topic 标题 -> top_message 映射（用于把消息投递到指定 topic）
+  - 由于 Telegram 对 bot 的 MTProto 接口有限制，bot 账号在部分环境下无法调用 `GetForumTopicsRequest` 获取 topic 列表；此时需要用 userbot 生成映射并写入配置。
+  - 生成/写入映射：
+    ```bash
+    docker compose run --rm userbot python scripts/sync_forum_topics.py --write
+    ```
+    （使用 userbot 登录态创建缺失 topic，并把映射写回 `config.json`）
 
 配置文件：
 - `config.json`：主配置（持久化）
