@@ -39,6 +39,12 @@
       {"chat_id": -1009876543210, "topics": ["English", "中文"]}
     ],
 
+    "topic_renames": {
+      "-1009876543210": {
+        "Mandarin Chinese speaker": "中文（繁體）"
+      }
+    },
+
     "blocklist_substrings": [
       "全球最快VPN",
       "网黄尊享"

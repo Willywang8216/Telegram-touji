@@ -73,6 +73,36 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
     ```
     （使用 userbot 登录态创建缺失 topic，并把映射写回 `config.json`）
 
+### 🌐 Topic 标题本地化 / 重命名（可选）
+
+如果你希望不同目标群使用不同语言的 topic 标题（例如同一分类在英文群是 `Asian bear`，中文群是 `亞洲熊`），可以在配置里添加：
+
+- `relay.topic_renames`: `{chat_id: {old_title: new_title}}`
+
+然后用 userbot 一键应用并同步映射：
+
+```bash
+docker compose run --rm userbot python scripts/sync_forum_topics.py --rename --write
+```
+
+### 🗓️ Topic 日更保底（可选）
+
+`scripts/autofill_topics.py` 会把每个 topic 的“每日帖子数”补到指定数量：
+- 如果当天新内容不足，会从该 topic 的历史消息中随机挑选并重发
+- 使用 SQLite 记录最近使用过的消息，尽量均匀且减少重复
+
+一次性执行：
+
+```bash
+docker compose run --rm userbot python scripts/autofill_topics.py --min-per-topic 10
+```
+
+后台常驻（每小时检查一次）：
+
+```bash
+docker compose run --rm userbot python scripts/autofill_topics.py --daemon --interval-min 60 --min-per-topic 10
+```
+
 配置文件：
 - `config.json`：主配置（持久化）
 - `.env`：环境覆盖（敏感信息建议优先放这里）

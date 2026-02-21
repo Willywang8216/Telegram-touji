@@ -24,18 +24,39 @@ async def list_topics(client: TelegramClient, peer):
             q="",
         )
     )
-    return entity, {t.title: t.top_message for t in res.topics}
+    return entity, list(res.topics)
+
+
+async def apply_topic_renames(client: TelegramClient, peer, renames: dict[str, str]) -> None:
+    if not renames:
+        return
+
+    entity, topics = await list_topics(client, peer)
+    by_title = {t.title: t for t in topics}
+
+    for old, new in renames.items():
+        if not old or not new or old == new:
+            continue
+        if old not in by_title:
+            continue
+        if new in by_title:
+            continue
+
+        t = by_title[old]
+        await client(functions.messages.EditForumTopicRequest(peer=entity, topic_id=int(t.id), title=str(new)))
 
 
 async def ensure_topics(client: TelegramClient, peer, titles: list[str]):
-    entity, existing = await list_topics(client, peer)
+    entity, topics = await list_topics(client, peer)
+    existing = {t.title: t.top_message for t in topics}
     missing = [t for t in titles if t not in existing]
 
     for title in missing:
         await client(functions.messages.CreateForumTopicRequest(peer=entity, title=title, icon_color=0x6FB9F0))
 
     if missing:
-        _, existing = await list_topics(client, peer)
+        _, topics = await list_topics(client, peer)
+        existing = {t.title: t.top_message for t in topics}
 
     return existing
 
@@ -44,6 +65,7 @@ async def main():
     parser = argparse.ArgumentParser(description="Ensure forum topics exist and write topic->top_message mapping into config")
     parser.add_argument("--config", default="config.json", help="Path to config.json")
     parser.add_argument("--write", action="store_true", help="Write mapping into relay.forum_topic_top_messages")
+    parser.add_argument("--rename", action="store_true", help="Apply relay.topic_renames before syncing")
     args = parser.parse_args()
 
     config_manager = ConfigManager(args.config)
@@ -60,14 +82,23 @@ async def main():
 
     try:
         out: dict[str, dict[str, int]] = {}
+        renames_cfg = relay.get("topic_renames") or {}
+
         for item in ensure:
             chat_id = item.get("chat_id")
             titles = [str(t) for t in (item.get("topics") or [])]
             if not chat_id or not titles:
                 continue
 
-            existing = await ensure_topics(client, int(chat_id), titles)
-            out[str(int(chat_id))] = {t: int(existing[t]) for t in titles if t in existing}
+            peer = int(chat_id)
+
+            if args.rename:
+                chat_renames = renames_cfg.get(str(peer)) or renames_cfg.get(peer) or {}
+                if isinstance(chat_renames, dict) and chat_renames:
+                    await apply_topic_renames(client, peer, {str(k): str(v) for k, v in chat_renames.items()})
+
+            existing = await ensure_topics(client, peer, titles)
+            out[str(peer)] = {t: int(existing[t]) for t in titles if t in existing}
 
         print(json.dumps(out, ensure_ascii=False, indent=2))
 
