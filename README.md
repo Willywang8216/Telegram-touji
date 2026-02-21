@@ -64,6 +64,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `config.json`：主配置（持久化）
 - `.env`：环境覆盖（敏感信息建议优先放这里）
 
+如果你没有运行 `scripts/install.sh`，可以先：
+
+```bash
+cp .env.example .env
+```
+
+然后编辑 `.env` 填入敏感信息。
+
 `docker-compose.yml` 已通过 `env_file: .env` 自动注入运行环境。
 
 ---
