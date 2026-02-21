@@ -72,6 +72,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
     docker compose run --rm userbot python scripts/sync_forum_topics.py --write
     ```
     （使用 userbot 登录态创建缺失 topic，并把映射写回 `config.json`）
+- `topic_renames`: 批量重命名 topic（用于中英文不同标题、加 emoji 前缀）
+- `topic_icon_emojis`: 为 topic 设置 icon（使用默认 topic icon stickerset 里的 custom emoji，通过 emoji 进行映射）
 
 ### 🌐 Topic 标题本地化 / 重命名（可选）
 
@@ -82,7 +84,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 然后用 userbot 一键应用并同步映射：
 
 ```bash
-docker compose run --rm userbot python scripts/sync_forum_topics.py --rename --write
+docker compose run --rm userbot python scripts/sync_forum_topics.py --rename --icons --write
+```
+
+默认可用的 topic icon（custom emoji）列表可以用 userbot 查看：
+
+```bash
+docker compose run --rm userbot python scripts/list_topic_icons.py
 ```
 
 ### 🗓️ Topic 日更保底（可选）

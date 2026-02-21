@@ -172,7 +172,7 @@ def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, look
         FROM candidates
         WHERE chat_id=? AND top_message=? AND has_media=1
           AND (last_used IS NULL OR last_used < ?)
-        ORDER BY (last_used IS NOT NULL), last_used, RANDOM()
+        ORDER BY RANDOM()
         LIMIT 1
         """,
         (topic.chat_id, topic.top_message, cutoff),
@@ -186,7 +186,7 @@ def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, look
         SELECT message_id
         FROM candidates
         WHERE chat_id=? AND top_message=? AND has_media=1
-        ORDER BY (last_used IS NOT NULL), last_used, RANDOM()
+        ORDER BY RANDOM()
         LIMIT 1
         """,
         (topic.chat_id, topic.top_message),
