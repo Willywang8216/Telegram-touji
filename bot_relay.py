@@ -137,9 +137,19 @@ async def _source_title(source_peer_id: int | None, msg) -> str | None:
 def _should_skip_text(text: str, blocklist_substrings: list[str]) -> bool:
     if not text:
         return False
+
+    text_norm = str(text).lower()
+    text_compact = "".join(text_norm.split())
+
     for needle in blocklist_substrings:
-        if needle and needle in text:
+        if not needle:
+            continue
+        n = str(needle).lower()
+        if n in text_norm:
             return True
+        if "".join(n.split()) in text_compact:
+            return True
+
     return False
 
 
@@ -366,7 +376,7 @@ async def process_media_group(gid: int):
 
         msgs.sort(key=lambda x: x.id)
         media = [m.media for m in msgs]
-        original_caption = next((m.text for m in msgs if m.text), "")
+        original_caption = next((_raw_message_text(m) for m in msgs if _raw_message_text(m)), "")
 
         s = current_settings()
         blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
