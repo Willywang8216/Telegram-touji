@@ -12,7 +12,31 @@
     "api_id": 12345678,
     "api_hash": "your_api_hash",
     "bot_token": "123456:ABCDEF_your_bot_token",
-    "dest_channels": [-1009876543210]
+
+    "strip_text": true,
+
+    "dest_channels": [-1009876543210],
+    "default_destinations": [
+      {"chat_id": -1009876543210, "topic_title": "General"}
+    ],
+
+    "routes": [
+      {
+        "source_chat": -1001234567890,
+        "destinations": [
+          {"chat_id": -1009876543210, "topic_title": "Asian Porn"}
+        ]
+      }
+    ],
+
+    "ensure_forum_topics": [
+      {"chat_id": -1009876543210, "topics": ["English", "中文"]}
+    ],
+
+    "blocklist_substrings": [
+      "全球最快VPN",
+      "网黄尊享"
+    ]
   },
   "proxy": null
 }

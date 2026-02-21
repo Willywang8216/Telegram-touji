@@ -89,18 +89,33 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     api_id = _env_int("RELAY_API_ID", _env_int("API_ID", int(relay.get("api_id", cfg.get("api_id", 0)))))
     api_hash = _env_str("RELAY_API_HASH", _env_str("API_HASH", relay.get("api_hash", cfg.get("api_hash", ""))))
     bot_token = _env_str("RELAY_BOT_TOKEN", relay.get("bot_token", ""))
+
     dest_raw = _env_str("RELAY_DEST_CHANNELS")
     if dest_raw:
         dest_channels = [int(x.strip()) for x in dest_raw.split(",") if x.strip()]
     else:
         dest_channels = [int(x) for x in relay.get("dest_channels", [])]
 
-    if not api_id or not api_hash or not bot_token or not dest_channels:
-        raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/dest_channels")
+    default_destinations = relay.get("default_destinations")
+    if default_destinations is None:
+        default_destinations = [{"chat_id": cid} for cid in dest_channels]
+
+    routes = relay.get("routes", [])
+    strip_text = bool(relay.get("strip_text", True))
+    blocklist_substrings = relay.get("blocklist_substrings", [])
+    ensure_forum_topics = relay.get("ensure_forum_topics", [])
+
+    if not api_id or not api_hash or not bot_token or (not default_destinations and not routes):
+        raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/(default_destinations|routes)")
 
     return {
         "api_id": api_id,
         "api_hash": api_hash,
         "bot_token": bot_token,
         "dest_channels": dest_channels,
+        "default_destinations": default_destinations,
+        "routes": routes,
+        "strip_text": strip_text,
+        "blocklist_substrings": blocklist_substrings,
+        "ensure_forum_topics": ensure_forum_topics,
     }

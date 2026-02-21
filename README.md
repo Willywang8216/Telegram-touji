@@ -45,7 +45,19 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `source_chat`
 - `target_bot`
 - `relay.bot_token`
-- `dest_channels`（逗号分隔）
+- `dest_channels`（逗号分隔，旧版兼容：无路由时会广播到这些频道/群）
+
+### 🧵 Topics / 路由（可选）
+
+如果目标是带 Topics 的 supergroup（forum），可以用下面的字段把不同来源路由到不同 topic：
+
+- `relay.default_destinations`: 默认投递目标（未命中 routes 时使用）
+- `relay.routes`: 按 `source_chat` 精确匹配来源的路由规则
+- `topic_title`: 目标 topic 标题（不存在会自动创建）
+- `topic_from_source`: 为 true 时，自动使用“来源频道/群标题”作为 topic 名（不存在会自动创建）
+- `strip_text`: 是否清空原始文字/广告（默认 `true`）
+- `blocklist_substrings`: 命中任意子串则丢弃消息（用于过滤诈骗/广告）
+- `ensure_forum_topics`: 启动时预创建一些 topics
 
 配置文件：
 - `config.json`：主配置（持久化）

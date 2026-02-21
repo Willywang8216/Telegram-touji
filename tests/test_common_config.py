@@ -47,6 +47,31 @@ class TestCommonConfig(unittest.TestCase):
         s = load_relay_settings(m)
         self.assertEqual(s["dest_channels"], [-200, -300])
 
+    def test_routes_without_default_destinations(self):
+        self.path.write_text(
+            json.dumps(
+                {
+                    "api_id": 1,
+                    "api_hash": "h",
+                    "master_account_id": 2,
+                    "bot_mappings": [{"source_chat": -1, "target_bot": "@bot"}],
+                    "relay": {
+                        "api_id": 1,
+                        "api_hash": "h",
+                        "bot_token": "token",
+                        "routes": [
+                            {"source_chat": -1001, "destinations": [{"chat_id": -100}]},
+                        ],
+                    },
+                    "proxy": None,
+                }
+            ),
+            encoding="utf-8",
+        )
+        m = ConfigManager(str(self.path))
+        s = load_relay_settings(m)
+        self.assertEqual(len(s["routes"]), 1)
+
     def test_save(self):
         m = ConfigManager(str(self.path))
         cfg = m.load()
