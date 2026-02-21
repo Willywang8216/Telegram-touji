@@ -169,11 +169,30 @@ def _resolve_destinations_for_source(source_peer_id: int | None) -> list[dict]:
     return _normalize_destinations(s.get("default_destinations"))
 
 
-async def _send_to_destination(msg, destination: dict, source_topic_title: str | None = None):
+def _bucket_topic_title(bucket_cfg: dict, source_peer_id: int | None, message_id: int) -> str | None:
+    if not bucket_cfg:
+        return None
+    prefix = bucket_cfg.get("prefix")
+    count = int(bucket_cfg.get("count") or 0)
+    start = int(bucket_cfg.get("start") or 1)
+    if not prefix or count <= 0:
+        return None
+
+    key = source_peer_id if source_peer_id is not None else message_id
+    idx = (abs(int(key)) % count) + start
+    return f"{prefix}{idx}"
+
+
+async def _send_to_destination(msg, destination: dict, source_peer_id: int | None = None, source_topic_title: str | None = None):
     chat_id = int(destination.get("chat_id"))
+
     topic_title = destination.get("topic_title") or destination.get("topic")
     if destination.get("topic_from_source"):
         topic_title = source_topic_title
+
+    bucket_cfg = destination.get("bucket_topics") or destination.get("bucket")
+    if bucket_cfg:
+        topic_title = _bucket_topic_title(bucket_cfg, source_peer_id=source_peer_id, message_id=msg.id)
 
     reply_to = None
     if topic_title:
@@ -268,6 +287,10 @@ async def process_media_group(gid: int):
             if dest.get("topic_from_source"):
                 topic_title = source_title
 
+            bucket_cfg = dest.get("bucket_topics") or dest.get("bucket")
+            if bucket_cfg:
+                topic_title = _bucket_topic_title(bucket_cfg, source_peer_id=source_peer_id, message_id=msgs[0].id)
+
             reply_to = None
             if topic_title:
                 try:
@@ -308,7 +331,7 @@ async def send_copy(msg):
 
     for dest in destinations:
         try:
-            await _send_to_destination(msg, dest, source_topic_title=source_title)
+            await _send_to_destination(msg, dest, source_peer_id=source_peer_id, source_topic_title=source_title)
             log_event(logger, logging.INFO, "message_sent", chat_id=int(dest.get("chat_id")), message_id=msg.id)
         except Exception as exc:  # noqa: BLE001
             payload = {"chat_id": int(dest.get("chat_id")), "message_id": msg.id, "error": str(exc)}
