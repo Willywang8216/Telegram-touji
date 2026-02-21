@@ -200,7 +200,7 @@ async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
 
         if title not in forum_topics_cache[chat_id]:
             try:
-                await client(functions.channels.CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
+                await client(functions.messages.CreateForumTopicRequest(peer=entity, title=title, icon_color=0x6FB9F0))
             except Exception as exc:  # noqa: BLE001
                 msg = str(exc).lower()
                 if "cannot be executed as a bot" in msg or "bot users is restricted" in msg:
@@ -262,7 +262,9 @@ def _bucket_topic_title(bucket_cfg: dict, source_peer_id: int | None, message_id
     return f"{prefix}{idx}"
 
 
-async def _send_to_destination(msg, destination: dict, source_peer_id: int | None = None, source_topic_title: str | None = None):
+async def _send_to_destination(
+    msg, destination: dict, source_peer_id: int | None = None, source_topic_title: str | None = None
+) -> bool:
     chat_id = int(destination.get("chat_id"))
 
     topic_title = destination.get("topic_title") or destination.get("topic")
@@ -284,7 +286,7 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
         s = current_settings()
         if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
             log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
-            return
+            return False
 
     s = current_settings()
     if s.get("strip_text"):
@@ -293,7 +295,7 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
         caption = _strip_source_marker(_raw_message_text(msg))
 
     if msg.media is None and not caption:
-        return
+        return False
 
     await rate_limiter.wait()
     try:
@@ -304,6 +306,7 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
             logger=logger,
             action="send_message",
         )
+        return True
     except Exception as exc:  # noqa: BLE001
         if msg.media is not None and _is_send_videos_forbidden(exc):
             await with_retry(
@@ -313,8 +316,9 @@ async def _send_to_destination(msg, destination: dict, source_peer_id: int | Non
                 logger=logger,
                 action="send_file_force_document",
             )
-        else:
-            raise
+            return True
+        raise
+
 
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
@@ -461,12 +465,14 @@ async def send_copy(msg):
 
     for dest in destinations:
         try:
-            await _send_to_destination(msg, dest, source_peer_id=source_peer_id, source_topic_title=source_title)
-            log_event(logger, logging.INFO, "message_sent", chat_id=int(dest.get("chat_id")), message_id=msg.id)
+            sent = await _send_to_destination(msg, dest, source_peer_id=source_peer_id, source_topic_title=source_title)
+            if sent:
+                log_event(logger, logging.INFO, "message_sent", chat_id=int(dest.get("chat_id")), message_id=msg.id)
         except Exception as exc:  # noqa: BLE001
             payload = {"chat_id": int(dest.get("chat_id")), "message_id": msg.id, "error": str(exc)}
             write_dlq(DLQ_PATH, payload)
             log_event(logger, logging.ERROR, "message_send_failed", **payload)
+
 
 
 async def ensure_forum_topics_on_startup():

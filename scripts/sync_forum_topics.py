@@ -32,7 +32,7 @@ async def ensure_topics(client: TelegramClient, peer, titles: list[str]):
     missing = [t for t in titles if t not in existing]
 
     for title in missing:
-        await client(functions.channels.CreateForumTopicRequest(channel=entity, title=title, icon_color=0x6FB9F0))
+        await client(functions.messages.CreateForumTopicRequest(peer=entity, title=title, icon_color=0x6FB9F0))
 
     if missing:
         _, existing = await list_topics(client, peer)
