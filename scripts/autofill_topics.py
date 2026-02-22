@@ -223,7 +223,7 @@ async def _count_today_messages(
     try:
         async for m in client.iter_messages(
             topic.chat_id,
-            reply_to=topic.top_message,
+            reply_to=topic.topic_id,
             limit=max(int(need) * 3, 50),
         ):
             if not getattr(m, "date", None):
@@ -244,7 +244,7 @@ async def _count_today_messages(
 
 
 def _topic_key(topic: TopicRef) -> int:
-    return int(topic.top_message)
+    return int(topic.topic_id)
 
 
 def _get_scan_state(conn: sqlite3.Connection, topic: TopicRef) -> tuple[int, bool]:
@@ -282,15 +282,22 @@ async def _scan_candidates(
     self_user_id: int | None,
 ) -> None:
     offset_id, done = _get_scan_state(conn, topic)
-    if done:
-        return
-
     topic_key = _topic_key(topic)
 
     existing_total = conn.execute(
         "SELECT COUNT(1) FROM candidates2 WHERE chat_id=? AND topic_id=? AND has_media=1",
         (topic.chat_id, topic_key),
     ).fetchone()[0]
+
+    # If a previous run (or older buggy version) marked this topic as done but we have no candidates,
+    # reset scan state and try again.
+    if done and int(existing_total) <= 0:
+        offset_id = 0
+        done = False
+        _set_scan_state(conn, topic, offset_id=0, done=False)
+
+    if done:
+        return
 
     if int(existing_total) >= int(max_total):
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
@@ -301,10 +308,23 @@ async def _scan_candidates(
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
+    print(
+        f"scan_start: chat_id={topic.chat_id} title={topic.title!r} topic_id={topic.topic_id} offset_id={int(offset_id)} limit={int(limit)} existing={int(existing_total)}",
+        flush=True,
+    )
+
     min_seen_id = None
+    scanned = 0
+    kept = 0
 
     try:
-        async for m in client.iter_messages(topic.chat_id, reply_to=topic.top_message, limit=limit, offset_id=offset_id):
+        async for m in client.iter_messages(
+            topic.chat_id,
+            reply_to=topic.topic_id,
+            limit=limit,
+            offset_id=offset_id,
+        ):
+            scanned += 1
             if min_seen_id is None or int(m.id) < int(min_seen_id):
                 min_seen_id = int(m.id)
 
@@ -319,6 +339,13 @@ async def _scan_candidates(
                 "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
                 (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
             )
+            kept += 1
+
+            if scanned % 100 == 0:
+                print(
+                    f"scan_progress: chat_id={topic.chat_id} title={topic.title!r} scanned={int(scanned)} kept={int(kept)}",
+                    flush=True,
+                )
     except BadRequestError as exc:
         if _is_topic_id_invalid(exc):
             raise TopicInvalidError(str(exc)) from exc
@@ -326,8 +353,12 @@ async def _scan_candidates(
 
     conn.commit()
 
+    print(
+        f"scan_end: chat_id={topic.chat_id} title={topic.title!r} scanned={int(scanned)} kept={int(kept)}",
+        flush=True,
+    )
+
     if min_seen_id is None:
-        # We saw no messages at all. Mark done.
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
@@ -486,7 +517,7 @@ async def run_once(
     posted = 0
 
     for topic in topics:
-        print(f"topic_check: chat_id={topic.chat_id} title={topic.title!r}")
+        print(f"topic_check: chat_id={topic.chat_id} title={topic.title!r}", flush=True)
 
         if topic.topic_id <= 0 or topic.top_message <= 0:
             resolved = await _resolve_topic(client, topic.chat_id, topic.title)
@@ -494,8 +525,12 @@ async def run_once(
                 print(f"skip topic (not found): chat_id={topic.chat_id} title={topic.title!r}")
                 continue
             topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
+            print(
+                f"topic_resolved: chat_id={topic.chat_id} title={topic.title!r} topic_id={topic.topic_id} top_message={topic.top_message}",
+                flush=True,
+            )
 
-        mode_inactive = int(inactive_min) > 0
+        mode_inactive = int(inactive_min) > 0 
         # In inactive mode we only check for activity within the last N minutes.
         # Default behaviour: if there was any activity, do nothing; otherwise post fill_count.
         count_need = 1
