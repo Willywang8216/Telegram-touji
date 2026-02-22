@@ -186,10 +186,16 @@ def _build_filter_settings(cfg: dict) -> dict:
 
     blocklist_substrings = AUTOFILL_BUILTIN_BLOCKLIST_SUBSTRINGS + list(relay.get("blocklist_substrings") or [])
 
+    # NOTE: autofill reposts media without captions, so blocking "contact ads" based on caption text
+    # is often too aggressive and can result in zero candidates. Default to False for autofill.
+    block_contact_ads = relay.get("autofill_block_contact_ads")
+    if block_contact_ads is None:
+        block_contact_ads = False
+
     return {
         "blocklist_substrings": blocklist_substrings,
         "blocklist_regexes": relay.get("blocklist_regexes") or [],
-        "block_contact_ads": bool(relay.get("block_contact_ads", True)),
+        "block_contact_ads": bool(block_contact_ads),
         "contact_ad_keywords": relay.get("contact_ad_keywords"),
     }
 
@@ -200,13 +206,8 @@ def _should_skip_message(msg, filter_settings: dict) -> bool:
         return True
 
     text = _raw_message_text(msg)
-    if text:
-        norm = text.lower()
-        if re.search(r"@[a-z0-9_]{4,}", norm) or ("t.me/" in norm) or ("telegram.me/" in norm) or ("tg://" in norm):
-            return True
-
-        if should_block_text(text, **filter_settings):
-            return True
+    if text and should_block_text(text, **filter_settings):
+        return True
 
     return False
 
@@ -485,6 +486,8 @@ async def run_once(
     posted = 0
 
     for topic in topics:
+        print(f"topic_check: chat_id={topic.chat_id} title={topic.title!r}")
+
         if topic.topic_id <= 0 or topic.top_message <= 0:
             resolved = await _resolve_topic(client, topic.chat_id, topic.title)
             if not resolved:

@@ -66,6 +66,12 @@ async def main():
     await client.start()
 
     try:
+        peer_raw = args.peer
+        try:
+            peer = int(peer_raw)
+        except ValueError:
+            peer = peer_raw
+
         reply_to = args.reply_to
         if reply_to is None and args.topic_title:
             reply_to = await _get_topic_top_message(client, peer, args.topic_title)
