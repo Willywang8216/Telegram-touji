@@ -28,6 +28,21 @@ BUILTIN_BLOCKLIST_SUBSTRINGS = [
     "Ban:  各类rush有货",
     "Contact the bot above if you would buy rush",
     "buy rush or purchase videos",
+
+    # drug / med ads
+    "rush",
+    "poppers",
+    "popper",
+    "viagra",
+    "cialis",
+    "伟哥",
+    "威而钢",
+    "威而鋼",
+    "春药",
+    "春藥",
+    "迷奸药",
+    "迷奸藥",
+
     "全球最快VPN",
     "点击注册购买VPN",
     "网黄尊享",
@@ -423,6 +438,9 @@ async def process_media_group(gid: int):
         destinations = _resolve_destinations_for_source(source_peer_id)
 
         caption = "" if s.get("strip_text") else _strip_source_marker(original_caption or "")
+
+        if not media and not caption:
+            return
 
         for dest in destinations:
             chat_id = int(dest.get("chat_id"))
