@@ -8,7 +8,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -211,7 +211,6 @@ def _should_skip_message(msg, filter_settings: dict) -> bool:
     return False
 
 
-
 async def _count_today_messages(
     client: TelegramClient,
     topic: TopicRef,
@@ -221,7 +220,11 @@ async def _count_today_messages(
 ) -> int:
     count = 0
     try:
-        async for m in client.iter_messages(topic.chat_id, reply_to=topic.topic_id, limit=max(need * 3, 50)):
+        async for m in client.iter_messages(
+            topic.chat_id,
+            reply_to=topic.topic_id,
+            limit=max(int(need) * 3, 50),
+        ):
             if not getattr(m, "date", None):
                 continue
             if m.date < day_start_utc:
@@ -269,6 +272,7 @@ async def _scan_candidates(
     batch_size: int,
     max_total: int,
     filter_settings: dict,
+    self_user_id: int | None,
 ) -> None:
     offset_id, done = _get_scan_state(conn, topic)
     if done:
@@ -288,10 +292,16 @@ async def _scan_candidates(
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
-    min_id = None
+    min_seen_id = None
 
     try:
         async for m in client.iter_messages(topic.chat_id, reply_to=topic.topic_id, limit=limit, offset_id=offset_id):
+            if min_seen_id is None or int(m.id) < int(min_seen_id):
+                min_seen_id = int(m.id)
+
+            if self_user_id is not None and getattr(m, "sender_id", None) == int(self_user_id):
+                continue
+
             if _should_skip_message(m, filter_settings):
                 continue
 
@@ -300,9 +310,6 @@ async def _scan_candidates(
                 "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
                 (topic.chat_id, topic.topic_id, int(m.id), 1, msg_date, None),
             )
-
-            if min_id is None or int(m.id) < int(min_id):
-                min_id = int(m.id)
     except BadRequestError as exc:
         if _is_topic_id_invalid(exc):
             raise TopicInvalidError(str(exc)) from exc
@@ -310,11 +317,11 @@ async def _scan_candidates(
 
     conn.commit()
 
-    if min_id is None:
+    if min_seen_id is None:
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
-    new_offset = int(min_id)
+    new_offset = int(min_seen_id)
     if new_offset == int(offset_id):
         _set_scan_state(conn, topic, offset_id=new_offset, done=True)
     else:
@@ -449,8 +456,19 @@ async def run_once(
     max_posts_per_run: int,
     sleep_between_posts: float,
     filter_settings: dict,
+    inactive_min: int,
+    fill_count: int,
+    top_up_window: bool,
+    force: bool,
+    self_user_id: int | None,
 ) -> None:
-    day_start_utc = _local_day_start_utc(tz_name)
+    now_utc = datetime.now(timezone.utc)
+
+    if int(inactive_min) > 0:
+        day_start_utc = now_utc - timedelta(minutes=int(inactive_min))
+    else:
+        day_start_utc = _local_day_start_utc(tz_name)
+
     now_ts = int(time.time())
 
     posted = 0
@@ -463,6 +481,17 @@ async def run_once(
                 continue
             topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
 
+        mode_inactive = int(inactive_min) > 0
+        # In inactive mode we only check for activity within the last N minutes.
+        # Default behaviour: if there was any activity, do nothing; otherwise post fill_count.
+        count_need = 1
+        if force:
+            count_need = 1
+        elif mode_inactive and bool(top_up_window):
+            count_need = int(fill_count)
+        elif not mode_inactive:
+            count_need = int(min_posts_per_topic_per_day)
+
         have = None
         for _ in range(2):
             try:
@@ -470,7 +499,7 @@ async def run_once(
                     client,
                     topic,
                     day_start_utc=day_start_utc,
-                    need=min_posts_per_topic_per_day,
+                    need=int(count_need),
                     filter_settings=filter_settings,
                 )
                 break
@@ -483,7 +512,7 @@ async def run_once(
                             client,
                             topic,
                             day_start_utc=day_start_utc,
-                            need=min_posts_per_topic_per_day,
+                            need=int(count_need),
                             filter_settings=filter_settings,
                         )
                         break
@@ -502,7 +531,18 @@ async def run_once(
         if have is None:
             continue
 
-        missing = max(0, int(min_posts_per_topic_per_day) - int(have))
+        if bool(mode_inactive) and not bool(force) and not bool(top_up_window):
+            # Any activity within the window means we leave the topic alone.
+            if int(have) > 0:
+                continue
+            missing = int(fill_count)
+        elif bool(mode_inactive) and bool(force):
+            missing = int(fill_count)
+        elif bool(mode_inactive) and bool(top_up_window):
+            missing = max(0, int(fill_count) - int(have))
+        else:
+            missing = max(0, int(min_posts_per_topic_per_day) - int(have))
+
         if missing <= 0:
             continue
 
@@ -514,6 +554,7 @@ async def run_once(
                 batch_size=scan_batch,
                 max_total=max_scan_per_topic,
                 filter_settings=filter_settings,
+                self_user_id=self_user_id,
             )
         except TopicInvalidError:
             if topic.top_message > 0 and topic.topic_id != topic.top_message:
@@ -527,6 +568,8 @@ async def run_once(
                         batch_size=scan_batch,
                         max_total=max_scan_per_topic,
                         filter_settings=filter_settings,
+                        self_user_id=self_user_id,
+                    )
                     )
                 except TopicInvalidError:
                     topic.topic_id = old_id
@@ -545,6 +588,7 @@ async def run_once(
                             batch_size=scan_batch,
                             max_total=max_scan_per_topic,
                             filter_settings=filter_settings,
+                            self_user_id=self_user_id,
                         )
                     except TopicInvalidError:
                         print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
@@ -588,12 +632,43 @@ async def run_once(
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Autofill forum topics with reposts to reach a daily minimum")
+    parser = argparse.ArgumentParser(
+        description="Autofill forum topics by reposting older media (daily minimum, or when a topic is inactive)"
+    )
     parser.add_argument("--config", default="config.json", help="Path to config.json")
     parser.add_argument("--db", default="data/autofill.sqlite3", help="SQLite db path for repost tracking")
-    parser.add_argument("--min-per-topic", type=int, default=10, help="Minimum posts per topic per day")
+
+    parser.add_argument(
+        "--min-per-topic",
+        type=int,
+        default=10,
+        help="Daily mode: minimum media posts per topic per day (ignored if --inactive-min > 0)",
+    )
     parser.add_argument("--tz", default=os.getenv("TZ", "Asia/Taipei"), help="Timezone for daily counting")
-    parser.add_argument("--lookback-days", type=int, default=30, help="Avoid reposting the same message within N days")
+
+    parser.add_argument(
+        "--inactive-min",
+        type=int,
+        default=0,
+        help="If > 0: treat the last N minutes as the activity window. Default behaviour posts when a topic had 0 posts in the window.",
+    )
+    parser.add_argument(
+        "--fill-count",
+        type=int,
+        default=10,
+        help="Inactive mode: how many posts to add when inactive (or target per window with --top-up-window)",
+    )
+    parser.add_argument(
+        "--top-up-window",
+        action="store_true",
+        help="Inactive mode: top up to --fill-count posts within the window (instead of only if 0)",
+    )
+    parser.add_argument("--force", action="store_true", help="Ignore activity checks and always post in inactive mode")
+
+    parser.add_argument("--only-chat-id", type=int, help="Only run topics in this chat_id")
+    parser.add_argument("--only-topic-title", help="Only run a single topic title (exact match)")
+
+    parser.add_argument("--lookback-days", type=int, default=30, help="Avoid reposting the same source message within N days")
     parser.add_argument("--scan-batch", type=int, default=300, help="How many messages to scan per topic per run")
     parser.add_argument("--max-scan-per-topic", type=int, default=5000, help="Max messages to remember per topic")
     parser.add_argument("--max-posts-per-run", type=int, default=200, help="Safety cap")
@@ -609,11 +684,23 @@ async def main():
     if not topics:
         raise SystemExit("No topics configured: set relay.ensure_forum_topics or relay.forum_topic_top_messages")
 
+    if args.only_chat_id is not None:
+        topics = [t for t in topics if int(t.chat_id) == int(args.only_chat_id)]
+
+    if args.only_topic_title:
+        topics = [t for t in topics if t.title == str(args.only_topic_title)]
+
+    if not topics:
+        raise SystemExit("No matching topics after applying --only-* filters")
+
     filter_settings = _build_filter_settings(cfg)
 
     settings = load_userbot_settings(config_manager)
     client = TelegramClient("autofill_session", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
     await client.start()
+
+    me = await client.get_me()
+    self_user_id = int(me.id) if me else None
 
     conn = _connect_db(args.db)
 
@@ -631,6 +718,11 @@ async def main():
                 max_posts_per_run=args.max_posts_per_run,
                 sleep_between_posts=args.sleep_between_posts,
                 filter_settings=filter_settings,
+                inactive_min=args.inactive_min,
+                fill_count=args.fill_count,
+                top_up_window=bool(args.top_up_window),
+                force=bool(args.force),
+                self_user_id=self_user_id,
             )
 
             if not args.daemon:
