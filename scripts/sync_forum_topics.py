@@ -214,7 +214,9 @@ async def main():
         raise SystemExit("relay.ensure_forum_topics is empty")
 
     settings = load_userbot_settings(config_manager)
-    client = TelegramClient("topics_session", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
+    session_dir = Path("data/sessions")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(str(session_dir / "userbot_tools"), settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
     await client.start()
 
     try:

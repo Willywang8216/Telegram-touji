@@ -20,7 +20,9 @@ async def main():
     config_manager = ConfigManager(args.config)
     settings = load_userbot_settings(config_manager)
 
-    client = TelegramClient("topic_icons_session", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
+    session_dir = Path("data/sessions")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(str(session_dir / "userbot_tools"), settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
     await client.start()
 
     try:

@@ -222,7 +222,7 @@ async def _count_today_messages(
     try:
         async for m in client.iter_messages(
             topic.chat_id,
-            reply_to=topic.topic_id,
+            reply_to=topic.top_message,
             limit=max(int(need) * 3, 50),
         ):
             if not getattr(m, "date", None):
@@ -242,15 +242,20 @@ async def _count_today_messages(
     return count
 
 
+def _topic_key(topic: TopicRef) -> int:
+    return int(topic.top_message)
+
+
 def _get_scan_state(conn: sqlite3.Connection, topic: TopicRef) -> tuple[int, bool]:
+    topic_key = _topic_key(topic)
     row = conn.execute(
         "SELECT offset_id, done FROM topic_scan2 WHERE chat_id=? AND topic_id=?",
-        (topic.chat_id, topic.topic_id),
+        (topic.chat_id, topic_key),
     ).fetchone()
     if not row:
         conn.execute(
             "INSERT OR REPLACE INTO topic_scan2(chat_id, topic_id, offset_id, done) VALUES(?,?,?,?)",
-            (topic.chat_id, topic.topic_id, 0, 0),
+            (topic.chat_id, topic_key, 0, 0),
         )
         conn.commit()
         return 0, False
@@ -258,9 +263,10 @@ def _get_scan_state(conn: sqlite3.Connection, topic: TopicRef) -> tuple[int, boo
 
 
 def _set_scan_state(conn: sqlite3.Connection, topic: TopicRef, offset_id: int, done: bool) -> None:
+    topic_key = _topic_key(topic)
     conn.execute(
         "INSERT OR REPLACE INTO topic_scan2(chat_id, topic_id, offset_id, done) VALUES(?,?,?,?)",
-        (topic.chat_id, topic.topic_id, int(offset_id), 1 if done else 0),
+        (topic.chat_id, topic_key, int(offset_id), 1 if done else 0),
     )
     conn.commit()
 
@@ -278,9 +284,11 @@ async def _scan_candidates(
     if done:
         return
 
+    topic_key = _topic_key(topic)
+
     existing_total = conn.execute(
         "SELECT COUNT(1) FROM candidates2 WHERE chat_id=? AND topic_id=? AND has_media=1",
-        (topic.chat_id, topic.topic_id),
+        (topic.chat_id, topic_key),
     ).fetchone()[0]
 
     if int(existing_total) >= int(max_total):
@@ -295,7 +303,7 @@ async def _scan_candidates(
     min_seen_id = None
 
     try:
-        async for m in client.iter_messages(topic.chat_id, reply_to=topic.topic_id, limit=limit, offset_id=offset_id):
+        async for m in client.iter_messages(topic.chat_id, reply_to=topic.top_message, limit=limit, offset_id=offset_id):
             if min_seen_id is None or int(m.id) < int(min_seen_id):
                 min_seen_id = int(m.id)
 
@@ -308,7 +316,7 @@ async def _scan_candidates(
             msg_date = int(m.date.timestamp()) if getattr(m, "date", None) else None
             conn.execute(
                 "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
-                (topic.chat_id, topic.topic_id, int(m.id), 1, msg_date, None),
+                (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
             )
     except BadRequestError as exc:
         if _is_topic_id_invalid(exc):
@@ -318,6 +326,7 @@ async def _scan_candidates(
     conn.commit()
 
     if min_seen_id is None:
+        # We saw no messages at all. Mark done.
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
@@ -330,6 +339,7 @@ async def _scan_candidates(
 
 def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, lookback_days: int) -> int | None:
     cutoff = int(now_ts) - (int(lookback_days) * 86400)
+    topic_key = _topic_key(topic)
 
     row = conn.execute(
         """
@@ -340,7 +350,7 @@ def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, look
         ORDER BY RANDOM()
         LIMIT 1
         """,
-        (topic.chat_id, topic.topic_id, cutoff),
+        (topic.chat_id, topic_key, cutoff),
     ).fetchone()
 
     if row:
@@ -354,7 +364,7 @@ def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, look
         ORDER BY (last_used IS NULL) DESC, last_used ASC, RANDOM()
         LIMIT 1
         """,
-        (topic.chat_id, topic.topic_id),
+        (topic.chat_id, topic_key),
     ).fetchone()
 
     if not row:
@@ -398,9 +408,10 @@ async def _repost_message(client: TelegramClient, topic: TopicRef, message_id: i
 
 
 def _mark_used(conn: sqlite3.Connection, topic: TopicRef, message_id: int, now_ts: int) -> None:
+    topic_key = _topic_key(topic)
     conn.execute(
         "UPDATE candidates2 SET last_used=? WHERE chat_id=? AND topic_id=? AND message_id=?",
-        (int(now_ts), topic.chat_id, topic.topic_id, int(message_id)),
+        (int(now_ts), topic.chat_id, topic_key, int(message_id)),
     )
     conn.commit()
 
@@ -504,26 +515,9 @@ async def run_once(
                 )
                 break
             except TopicInvalidError:
-                if topic.top_message > 0 and topic.topic_id != topic.top_message:
-                    old_id = topic.topic_id
-                    topic.topic_id = topic.top_message
-                    try:
-                        have = await _count_today_messages(
-                            client,
-                            topic,
-                            day_start_utc=day_start_utc,
-                            need=int(count_need),
-                            filter_settings=filter_settings,
-                        )
-                        break
-                    except TopicInvalidError:
-                        topic.topic_id = old_id
-
                 resolved = await _resolve_topic(client, topic.chat_id, topic.title)
-                if not resolved or int(resolved[0]) == int(topic.topic_id):
-                    print(
-                        f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r} topic_id={topic.topic_id} top_message={topic.top_message}"
-                    )
+                if not resolved:
+                    print(f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
                     have = None
                     break
                 topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
@@ -546,55 +540,43 @@ async def run_once(
         if missing <= 0:
             continue
 
-        try:
-            await _scan_candidates(
-                client,
-                conn,
-                topic,
-                batch_size=scan_batch,
-                max_total=max_scan_per_topic,
-                filter_settings=filter_settings,
-                self_user_id=self_user_id,
-            )
-        except TopicInvalidError:
-            if topic.top_message > 0 and topic.topic_id != topic.top_message:
-                old_id = topic.topic_id
-                topic.topic_id = topic.top_message
-                try:
-                    await _scan_candidates(
-                        client,
-                        conn,
-                        topic,
-                        batch_size=scan_batch,
-                        max_total=max_scan_per_topic,
-                        filter_settings=filter_settings,
-                        self_user_id=self_user_id,
-                    )
-                except TopicInvalidError:
-                    topic.topic_id = old_id
-
-            if topic.top_message > 0 and topic.topic_id == topic.top_message:
-                pass
-            else:
+        scanned = False
+        for _ in range(2):
+            try:
+                await _scan_candidates(
+                    client,
+                    conn,
+                    topic,
+                    batch_size=scan_batch,
+                    max_total=max_scan_per_topic,
+                    filter_settings=filter_settings,
+                    self_user_id=self_user_id,
+                )
+                scanned = True
+                break
+            except TopicInvalidError:
                 resolved = await _resolve_topic(client, topic.chat_id, topic.title)
-                if resolved and int(resolved[0]) != int(topic.topic_id):
-                    topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
-                    try:
-                        await _scan_candidates(
-                            client,
-                            conn,
-                            topic,
-                            batch_size=scan_batch,
-                            max_total=max_scan_per_topic,
-                            filter_settings=filter_settings,
-                            self_user_id=self_user_id,
-                        )
-                    except TopicInvalidError:
-                        print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-                        continue
-                else:
-                    print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-                    continue
+                if not resolved:
+                    break
+                topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
+
+        if not scanned:
+            print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+            continue
+
+        topic_key = _topic_key(topic)
+        candidate_total = conn.execute(
+            "SELECT COUNT(1) FROM candidates2 WHERE chat_id=? AND topic_id=? AND has_media=1",
+            (topic.chat_id, topic_key),
+        ).fetchone()[0]
+
+        if int(candidate_total) <= 0:
+            print(f"skip topic (no candidates): chat_id={topic.chat_id} title={topic.title!r}")
+            continue
+
+        print(
+            f"topic_fill: chat_id={topic.chat_id} title={topic.title!r} have={int(have)} missing={int(missing)} candidates={int(candidate_total)}"
+        )
 
         remaining = int(missing)
         attempts_left = max(remaining * 5, remaining)
@@ -605,6 +587,7 @@ async def run_once(
 
             pick = _pick_candidate(conn, topic, now_ts=now_ts, lookback_days=lookback_days)
             if pick is None:
+                print(f"stop topic (no candidate to repost): chat_id={topic.chat_id} title={topic.title!r}")
                 break
 
             ok = False
@@ -625,6 +608,7 @@ async def run_once(
             if not ok:
                 continue
 
+            print(f"reposted: chat_id={topic.chat_id} title={topic.title!r} message_id={int(pick)}")
             posted += 1
             remaining -= 1
             await asyncio.sleep(float(sleep_between_posts))
@@ -695,7 +679,15 @@ async def main():
     filter_settings = _build_filter_settings(cfg)
 
     settings = load_userbot_settings(config_manager)
-    client = TelegramClient("autofill_session", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
+
+    session_dir = Path("data/sessions")
+    session_dir.mkdir(parents=True, exist_ok=True)
+    client = TelegramClient(
+        str(session_dir / "userbot_tools"),
+        settings["api_id"],
+        settings["api_hash"],
+        proxy=settings["proxy"],
+    )
     await client.start()
 
     me = await client.get_me()
