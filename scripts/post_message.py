@@ -11,21 +11,40 @@ from telethon import TelegramClient, functions
 from common_config import ConfigManager, load_userbot_settings
 
 
+def _topic_title_variants(title: str) -> list[str]:
+    if not title:
+        return []
+
+    t = str(title)
+    out = [t]
+
+    # "🍑 Foo" -> "Foo"
+    if " " in t:
+        first, rest = t.split(" ", 1)
+        if len(first) <= 8 and rest:
+            out.append(rest)
+
+    return out
+
+
 async def _get_topic_top_message(client: TelegramClient, peer, title: str) -> int:
     entity = await client.get_entity(peer)
-    res = await client(
-        functions.messages.GetForumTopicsRequest(
-            peer=entity,
-            offset_date=None,
-            offset_id=0,
-            offset_topic=0,
-            limit=100,
-            q="",
+
+    for q in _topic_title_variants(title):
+        res = await client(
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
+                offset_date=None,
+                offset_id=0,
+                offset_topic=0,
+                limit=50,
+                q=str(q),
+            )
         )
-    )
-    for t in res.topics:
-        if t.title == title:
-            return int(t.top_message)
+        for t in res.topics:
+            if t.title == title or t.title == str(q):
+                return int(t.top_message)
+
     raise ValueError(f"Topic not found: {title}")
 
 

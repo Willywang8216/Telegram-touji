@@ -570,7 +570,6 @@ async def run_once(
                         filter_settings=filter_settings,
                         self_user_id=self_user_id,
                     )
-                    )
                 except TopicInvalidError:
                     topic.topic_id = old_id
 
