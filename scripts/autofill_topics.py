@@ -181,7 +181,7 @@ def _media_for_repost(msg):
     return None
 
 
-def _build_filter_settings(cfg: dict) -> dict:
+def _build_filter_settings(cfg: dict, ignore_text_filters: bool = False) -> dict:
     relay = cfg.get("relay") or {}
 
     blocklist_substrings = AUTOFILL_BUILTIN_BLOCKLIST_SUBSTRINGS + list(relay.get("blocklist_substrings") or [])
@@ -197,6 +197,7 @@ def _build_filter_settings(cfg: dict) -> dict:
         "blocklist_regexes": relay.get("blocklist_regexes") or [],
         "block_contact_ads": bool(block_contact_ads),
         "contact_ad_keywords": relay.get("contact_ad_keywords"),
+        "_ignore_text_filters": bool(ignore_text_filters),
     }
 
 
@@ -205,8 +206,17 @@ def _should_skip_message(msg, filter_settings: dict) -> bool:
         # skip anything that isn't an image/video (including text-only and link previews)
         return True
 
+    if bool(filter_settings.get("_ignore_text_filters")):
+        return False
+
     text = _raw_message_text(msg)
-    if text and should_block_text(text, **filter_settings):
+    if text and should_block_text(
+        text,
+        blocklist_substrings=filter_settings.get("blocklist_substrings"),
+        blocklist_regexes=filter_settings.get("blocklist_regexes"),
+        block_contact_ads=bool(filter_settings.get("block_contact_ads", True)),
+        contact_ad_keywords=filter_settings.get("contact_ad_keywords"),
+    ):
         return True
 
     return False
@@ -223,6 +233,7 @@ async def _count_today_messages(
     try:
         async for m in client.iter_messages(
             topic.chat_id,
+            # For forums, Telethon expects the topic's thread id here (topic.id)
             reply_to=topic.topic_id,
             limit=max(int(need) * 3, 50),
         ):
@@ -280,6 +291,9 @@ async def _scan_candidates(
     max_total: int,
     filter_settings: dict,
     self_user_id: int | None,
+    *,
+    debug: bool = False,
+    debug_limit: int = 20,
 ) -> None:
     offset_id, done = _get_scan_state(conn, topic)
     topic_key = _topic_key(topic)
@@ -329,9 +343,37 @@ async def _scan_candidates(
                 min_seen_id = int(m.id)
 
             if self_user_id is not None and getattr(m, "sender_id", None) == int(self_user_id):
+                if debug and int(scanned) <= int(debug_limit):
+                    print(
+                        f"scan_skip: chat_id={topic.chat_id} title={topic.title!r} message_id={int(m.id)} reason=self",
+                        flush=True,
+                    )
                 continue
 
             if _should_skip_message(m, filter_settings):
+                if debug and int(scanned) <= int(debug_limit):
+                    media = _media_for_repost(m)
+                    text = _raw_message_text(m)
+
+                    if media is None:
+                        reason = "no_media"
+                    elif bool(filter_settings.get("_ignore_text_filters")):
+                        reason = "other"
+                    elif text and should_block_text(
+                        text,
+                        blocklist_substrings=filter_settings.get("blocklist_substrings"),
+                        blocklist_regexes=filter_settings.get("blocklist_regexes"),
+                        block_contact_ads=bool(filter_settings.get("block_contact_ads", True)),
+                        contact_ad_keywords=filter_settings.get("contact_ad_keywords"),
+                    ):
+                        reason = "blocked_text"
+                    else:
+                        reason = "other"
+
+                    print(
+                        f"scan_skip: chat_id={topic.chat_id} title={topic.title!r} message_id={int(m.id)} reason={reason}",
+                        flush=True,
+                    )
                 continue
 
             msg_date = int(m.date.timestamp()) if getattr(m, "date", None) else None
@@ -504,6 +546,9 @@ async def run_once(
     top_up_window: bool,
     force: bool,
     self_user_id: int | None,
+    *,
+    debug_scan: bool = False,
+    debug_scan_limit: int = 20,
 ) -> None:
     now_utc = datetime.now(timezone.utc)
 
@@ -530,7 +575,7 @@ async def run_once(
                 flush=True,
             )
 
-        mode_inactive = int(inactive_min) > 0 
+        mode_inactive = int(inactive_min) > 0
         # In inactive mode we only check for activity within the last N minutes.
         # Default behaviour: if there was any activity, do nothing; otherwise post fill_count.
         count_need = 1
@@ -589,6 +634,8 @@ async def run_once(
                     max_total=max_scan_per_topic,
                     filter_settings=filter_settings,
                     self_user_id=self_user_id,
+                    debug=bool(debug_scan),
+                    debug_limit=int(debug_scan_limit),
                 )
                 scanned = True
                 break
@@ -689,6 +736,9 @@ async def main():
     parser.add_argument("--only-chat-id", type=int, help="Only run topics in this chat_id")
     parser.add_argument("--only-topic-title", help="Only run a single topic title (exact match)")
 
+    parser.add_argument("--debug-scan", action="store_true", help="Print skip reasons for the first few scanned messages")
+    parser.add_argument("--debug-scan-limit", type=int, default=20, help="How many scanned messages to debug-print")
+
     parser.add_argument("--lookback-days", type=int, default=30, help="Avoid reposting the same source message within N days")
     parser.add_argument("--scan-batch", type=int, default=300, help="How many messages to scan per topic per run")
     parser.add_argument("--max-scan-per-topic", type=int, default=5000, help="Max messages to remember per topic")
@@ -752,6 +802,8 @@ async def main():
                 top_up_window=bool(args.top_up_window),
                 force=bool(args.force),
                 self_user_id=self_user_id,
+                debug_scan=bool(args.debug_scan),
+                debug_scan_limit=int(args.debug_scan_limit),
             )
 
             if not args.daemon:
