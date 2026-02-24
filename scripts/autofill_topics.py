@@ -2,14 +2,13 @@ import argparse
 import asyncio
 import os
 import random
-import re
 import shutil
 import sqlite3
 import sys
 import tempfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -174,6 +173,7 @@ def _build_filter_settings(cfg: dict) -> dict:
 
     block_contact_ads = relay.get("autofill_block_contact_ads")
     if block_contact_ads is None:
+        # Autofill usually reposts without the original caption, so default to False.
         block_contact_ads = False
 
     return {
@@ -201,6 +201,39 @@ def _should_skip_message(msg, filter_settings: dict) -> bool:
     return False
 
 
+async def _iter_topic_messages(client: TelegramClient, topic: TopicRef, *, limit: int, offset_id: int = 0):
+    reply_to_candidates = [int(topic.topic_id), int(topic.top_message)]
+    last_exc = None
+
+    for reply_to in reply_to_candidates:
+        if reply_to <= 0:
+            continue
+        try:
+            it = client.iter_messages(
+                topic.chat_id,
+                reply_to=int(reply_to),
+                limit=int(limit),
+                offset_id=int(offset_id),
+            )
+
+            try:
+                first = await it.__anext__()
+            except StopAsyncIteration:
+                continue
+
+            yield first
+            async for m in it:
+                yield m
+            return
+        except BadRequestError as exc:
+            if _is_topic_id_invalid(exc):
+                last_exc = exc
+                continue
+            raise
+
+    raise TopicInvalidError(str(last_exc) if last_exc else "TOPIC_ID_INVALID")
+
+
 async def _count_today_messages(
     client: TelegramClient,
     topic: TopicRef,
@@ -208,42 +241,21 @@ async def _count_today_messages(
     need: int,
     filter_settings: dict,
 ) -> int:
-    async def _run(reply_to: int) -> int:
-        count = 0
-        async for m in client.iter_messages(
-            topic.chat_id,
-            reply_to=int(reply_to),
-            limit=max(int(need) * 3, 50),
-        ):
-            if not getattr(m, "date", None):
-                continue
-            if m.date < day_start_utc:
-                break
-            if _should_skip_message(m, filter_settings):
-                continue
-            count += 1
-            if count >= need:
-                return count
-        return count
-
-    # Telethon/Telegram varies here across forums: some require `reply_to=topic.id`,
-    # others work with `reply_to=top_message`. Try both.
-    reply_to_candidates = [int(topic.topic_id), int(topic.top_message)]
-    for reply_to in reply_to_candidates:
-        if reply_to <= 0:
+    count = 0
+    async for m in _iter_topic_messages(client, topic, limit=max(int(need) * 3, 50)):
+        if not getattr(m, "date", None):
             continue
-        try:
-            return await _run(reply_to)
-        except BadRequestError as exc:
-            if _is_topic_id_invalid(exc):
-                continue
-            raise
-
-    raise TopicInvalidError("TOPIC_ID_INVALID")
+        if m.date < day_start_utc:
+            break
+        if _should_skip_message(m, filter_settings):
+            continue
+        count += 1
+        if count >= need:
+            return count
+    return count
 
 
 def _topic_key(topic: TopicRef) -> int:
-    # Use the forum thread id as the stable key for caching/scan state.
     return int(topic.topic_id)
 
 
@@ -280,6 +292,9 @@ async def _scan_candidates(
     max_total: int,
     filter_settings: dict,
     self_user_id: int | None,
+    *,
+    debug: bool = False,
+    debug_limit: int = 20,
 ) -> None:
     offset_id, done = _get_scan_state(conn, topic)
     topic_key = _topic_key(topic)
@@ -308,47 +323,74 @@ async def _scan_candidates(
 
     min_seen_id = None
 
-    async def _run(reply_to: int) -> None:
-        nonlocal min_seen_id
-        async for m in client.iter_messages(
-            topic.chat_id,
-            reply_to=int(reply_to),
-            limit=limit,
-            offset_id=offset_id,
-        ):
-            if min_seen_id is None or int(m.id) < int(min_seen_id):
-                min_seen_id = int(m.id)
+    scanned_total = 0
+    skipped_self = 0
+    skipped_no_media = 0
+    skipped_blocked = 0
+    inserted = 0
+    debug_printed = 0
 
-            if self_user_id is not None and getattr(m, "sender_id", None) == int(self_user_id):
-                continue
+    def _debug(reason: str, m) -> None:
+        nonlocal debug_printed
+        if not debug or debug_printed >= int(debug_limit):
+            return
 
-            if _should_skip_message(m, filter_settings):
-                continue
+        media = getattr(m, "media", None)
+        media_type = type(media).__name__ if media is not None else None
+        doc = getattr(m, "document", None)
+        mime = (getattr(doc, "mime_type", None) or "").lower() if doc is not None else None
 
-            msg_date = int(m.date.timestamp()) if getattr(m, "date", None) else None
-            conn.execute(
-                "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
-                (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
-            )
+        text = _raw_message_text(m)
+        text = (text[:120] + "…") if len(text) > 120 else text
 
-    reply_to_candidates = [int(topic.topic_id), int(topic.top_message)]
-    ran = False
-    for reply_to in reply_to_candidates:
-        if reply_to <= 0:
+        print(
+            f"scan_skip: reason={reason} msg_id={getattr(m, 'id', None)} media={media_type} mime={mime!r} text={text!r}"
+        )
+        debug_printed += 1
+
+    async for m in _iter_topic_messages(client, topic, limit=limit, offset_id=offset_id):
+        scanned_total += 1
+
+        if min_seen_id is None or int(m.id) < int(min_seen_id):
+            min_seen_id = int(m.id)
+
+        if self_user_id is not None and getattr(m, "sender_id", None) == int(self_user_id):
+            skipped_self += 1
+            _debug("self", m)
             continue
-        try:
-            await _run(reply_to)
-            ran = True
-            break
-        except BadRequestError as exc:
-            if _is_topic_id_invalid(exc):
-                continue
-            raise
 
-    if not ran:
-        raise TopicInvalidError("TOPIC_ID_INVALID")
+        if _media_for_repost(m) is None:
+            skipped_no_media += 1
+            _debug("no_media", m)
+            continue
+
+        text = _raw_message_text(m)
+        if text and should_block_text(
+            text,
+            blocklist_substrings=filter_settings.get("blocklist_substrings"),
+            blocklist_regexes=filter_settings.get("blocklist_regexes"),
+            block_contact_ads=bool(filter_settings.get("block_contact_ads", True)),
+            contact_ad_keywords=filter_settings.get("contact_ad_keywords"),
+        ):
+            skipped_blocked += 1
+            _debug("blocked_text", m)
+            continue
+
+        msg_date = int(m.date.timestamp()) if getattr(m, "date", None) else None
+        before = conn.total_changes
+        conn.execute(
+            "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
+            (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
+        )
+        if conn.total_changes != before:
+            inserted += 1
 
     conn.commit()
+
+    if debug:
+        print(
+            f"scan_stats: chat_id={topic.chat_id} title={topic.title!r} scanned={scanned_total} inserted={inserted} skipped_self={skipped_self} skipped_no_media={skipped_no_media} skipped_blocked={skipped_blocked}"
+        )
 
     if min_seen_id is None:
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
@@ -523,6 +565,9 @@ async def run_once(
     force: bool,
     self_user_id: int | None,
     cfg: dict,
+    *,
+    debug_scan: bool = False,
+    debug_scan_limit: int = 20,
 ) -> None:
     now_utc = datetime.now(timezone.utc)
 
@@ -599,6 +644,8 @@ async def run_once(
                     max_total=max_scan_per_topic,
                     filter_settings=filter_settings,
                     self_user_id=self_user_id,
+                    debug=bool(debug_scan),
+                    debug_limit=int(debug_scan_limit),
                 )
                 scanned = True
                 break
@@ -696,6 +743,10 @@ async def main():
     parser.add_argument("--max-scan-per-topic", type=int, default=5000, help="Max messages to remember per topic")
     parser.add_argument("--max-posts-per-run", type=int, default=200, help="Safety cap")
     parser.add_argument("--sleep-between-posts", type=float, default=1.0, help="Delay between posts")
+
+    parser.add_argument("--debug-scan", action="store_true", help="Print why messages are skipped during scanning")
+    parser.add_argument("--debug-scan-limit", type=int, default=20, help="Max per-topic scan_skip lines")
+
     parser.add_argument("--daemon", action="store_true", help="Run forever")
     parser.add_argument("--interval-min", type=int, default=60, help="Loop interval in minutes for --daemon")
     args = parser.parse_args()
@@ -755,6 +806,8 @@ async def main():
                 force=bool(args.force),
                 self_user_id=self_user_id,
                 cfg=cfg,
+                debug_scan=bool(args.debug_scan),
+                debug_scan_limit=int(args.debug_scan_limit),
             )
 
             if not args.daemon:
