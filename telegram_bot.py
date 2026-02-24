@@ -51,11 +51,22 @@ async def rebuild_forwarding_map():
                 src_id = int(source_chat)
             except ValueError:
                 src_id = source_chat
+
             source_entity = await client.get_entity(src_id)
             target_entity = await client.get_entity(str(target_bot))
+
             peer_id = await client.get_peer_id(source_entity)
-            forwarding_map[peer_id] = target_entity
-            log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
+            noforwards = bool(getattr(source_entity, "noforwards", False))
+            forwarding_map[peer_id] = {"target_bot": target_entity, "noforwards": noforwards}
+
+            log_event(
+                logger,
+                logging.INFO,
+                "mapping_updated",
+                source_chat=str(source_chat),
+                target_bot=str(target_bot),
+                noforwards=noforwards,
+            )
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
 
@@ -105,7 +116,7 @@ def _src_marker(peer_id: int) -> str:
     return f"{SRC_MARKER_PREFIX}{peer_id}{SRC_MARKER_SUFFIX}"
 
 
-async def _copy_single_to_bot(target_bot, message_id: int, chat_id: int):
+async def _copy_single_to_bot(target_bot, message_id: int, chat_id: int, force_reupload: bool = False):
     msg = await client.get_messages(chat_id, ids=message_id)
     caption = _src_marker(chat_id)
     if getattr(msg, "message", None):
@@ -113,14 +124,12 @@ async def _copy_single_to_bot(target_bot, message_id: int, chat_id: int):
 
     await rate_limiter.wait()
     if msg.media is not None:
+        if force_reupload:
+            await _reupload_single_to_bot(target_bot, msg, caption)
+            return
+
         try:
-            await with_retry(
-                lambda: client.send_file(target_bot, msg.media, caption=caption),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="copy_single_send_file",
-            )
+            await client.send_file(target_bot, msg.media, caption=caption)
         except Exception as exc:  # noqa: BLE001
             if _is_protected_forward_error(exc):
                 await _reupload_single_to_bot(target_bot, msg, caption)
@@ -136,28 +145,61 @@ async def _copy_single_to_bot(target_bot, message_id: int, chat_id: int):
         )
 
 
-async def safe_forward_single(target_bot, message_id, chat_id):
+async def safe_forward_single(target_bot, message_id, chat_id, noforwards: bool = False):
+    if noforwards:
+        try:
+            await _copy_single_to_bot(target_bot, int(message_id), int(chat_id), force_reupload=True)
+            log_event(logger, logging.INFO, "message_copied", chat_id=str(chat_id), message_id=message_id, method="reupload")
+        except Exception as copy_exc:  # noqa: BLE001
+            if _is_protected_forward_error(copy_exc):
+                log_event(
+                    logger,
+                    logging.WARNING,
+                    "message_skipped_protected",
+                    chat_id=str(chat_id),
+                    message_id=message_id,
+                    error=str(copy_exc),
+                )
+                return
+
+            payload = {"chat_id": chat_id, "message_id": message_id, "error": str(copy_exc)}
+            write_dlq(DLQ_PATH, payload)
+            log_event(logger, logging.ERROR, "message_copy_failed", **payload)
+        return
+
     await rate_limiter.wait()
     try:
-        await with_retry(
-            lambda: client.forward_messages(target_bot, message_id, from_peer=chat_id),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="forward_single",
-        )
+        await client.forward_messages(target_bot, message_id, from_peer=chat_id)
         log_event(logger, logging.INFO, "message_forwarded", chat_id=str(chat_id), message_id=message_id)
     except Exception as exc:  # noqa: BLE001
         if _is_invalid_message_error(exc):
-            log_event(logger, logging.WARNING, "message_skipped_invalid", chat_id=str(chat_id), message_id=message_id, error=str(exc))
+            log_event(
+                logger,
+                logging.WARNING,
+                "message_skipped_invalid",
+                chat_id=str(chat_id),
+                message_id=message_id,
+                error=str(exc),
+            )
             return
 
         if _is_protected_forward_error(exc):
             try:
-                await _copy_single_to_bot(target_bot, int(message_id), int(chat_id))
-                log_event(logger, logging.INFO, "message_copied", chat_id=str(chat_id), message_id=message_id)
+                await _copy_single_to_bot(target_bot, int(message_id), int(chat_id), force_reupload=False)
+                log_event(logger, logging.INFO, "message_copied", chat_id=str(chat_id), message_id=message_id, method="fallback")
                 return
             except Exception as copy_exc:  # noqa: BLE001
+                if _is_protected_forward_error(copy_exc):
+                    log_event(
+                        logger,
+                        logging.WARNING,
+                        "message_skipped_protected",
+                        chat_id=str(chat_id),
+                        message_id=message_id,
+                        error=str(copy_exc),
+                    )
+                    return
+
                 payload = {"chat_id": chat_id, "message_id": message_id, "error": str(copy_exc)}
                 write_dlq(DLQ_PATH, payload)
                 log_event(logger, logging.ERROR, "message_copy_failed", **payload)
@@ -177,21 +219,30 @@ async def handler(event):
         log_event(logger, logging.INFO, "config_hot_reloaded")
 
     if event.chat_id in forwarding_map:
-        target_bot = forwarding_map[event.chat_id]
-        if event.message.grouped_id:
+        mapping = forwarding_map[event.chat_id]
+        target_bot = mapping["target_bot"]
+        noforwards = bool(mapping.get("noforwards"))
+
+        msg = event.message
+        if getattr(msg, "action", None) is not None:
+            return
+        if getattr(msg, "message", None) is None and getattr(msg, "media", None) is None and not msg.grouped_id:
+            return
+
+        if msg.grouped_id:
             async with media_group_lock:
                 gid = event.message.grouped_id
                 if gid not in media_group_cache:
-                    media_group_cache[gid] = {"messages": [], "task": None, "target_bot": target_bot}
+                    media_group_cache[gid] = {"messages": [], "task": None, "target_bot": target_bot, "noforwards": noforwards}
                 media_group_cache[gid]["messages"].append(event.message.id)
                 if media_group_cache[gid]["task"]:
                     media_group_cache[gid]["task"].cancel()
                 media_group_cache[gid]["task"] = asyncio.create_task(process_media_group(gid, event.chat_id))
         else:
-            await safe_forward_single(target_bot, event.message.id, event.chat_id)
+            await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards)
 
 
-async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int):
+async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int, force_reupload: bool = False):
     msgs = await client.get_messages(chat_id, ids=message_ids)
     msgs = [m for m in (list(msgs) if msgs else []) if m]
     msgs.sort(key=lambda m: m.id)
@@ -203,15 +254,14 @@ async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int):
         caption = f"{caption} {original_caption}"
 
     await rate_limiter.wait()
+
+    if force_reupload and files:
+        await _reupload_group_to_bot(target_bot, msgs, caption)
+        return
+
     if files:
         try:
-            await with_retry(
-                lambda: client.send_file(target_bot, files, caption=caption),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="copy_group_send_file",
-            )
+            await client.send_file(target_bot, files, caption=caption)
         except Exception as exc:  # noqa: BLE001
             if _is_protected_forward_error(exc):
                 await _reupload_group_to_bot(target_bot, msgs, caption)
@@ -230,54 +280,84 @@ async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int):
 async def process_media_group(grouped_id, from_peer):
     await asyncio.sleep(1.5)
     async with media_group_lock:
-        if grouped_id in media_group_cache:
-            data = media_group_cache[grouped_id]
-            try:
-                await rate_limiter.wait()
-                await with_retry(
-                    lambda: client.forward_messages(data["target_bot"], data["messages"], from_peer=from_peer),
-                    retries=3,
-                    base_delay=1,
-                    logger=logger,
-                    action="forward_group",
-                )
-                log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(data["messages"]))
-            except Exception as exc:  # noqa: BLE001
-                if _is_invalid_message_error(exc):
-                    try:
-                        msgs = await client.get_messages(int(from_peer), ids=[int(x) for x in data["messages"]])
-                        msgs = [m for m in (list(msgs) if msgs else []) if m]
-                        ids = [int(m.id) for m in msgs]
-                        if ids:
-                            await with_retry(
-                                lambda: client.forward_messages(data["target_bot"], ids, from_peer=from_peer),
-                                retries=3,
-                                base_delay=1,
-                                logger=logger,
-                                action="forward_group_partial",
-                            )
-                            log_event(logger, logging.INFO, "group_forwarded_partial", group_id=grouped_id, count=len(ids))
-                            return
-                    except Exception as retry_exc:  # noqa: BLE001
-                        payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(retry_exc)}
-                        write_dlq(DLQ_PATH, payload)
-                        log_event(logger, logging.ERROR, "group_forward_failed", **payload)
+        if grouped_id not in media_group_cache:
+            return
+
+        data = media_group_cache[grouped_id]
+        target_bot = data["target_bot"]
+        noforwards = bool(data.get("noforwards"))
+        message_ids = [int(x) for x in data["messages"]]
+
+        try:
+            if noforwards:
+                try:
+                    await _copy_group_to_bot(target_bot, message_ids, int(from_peer), force_reupload=True)
+                    log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(message_ids), method="reupload")
+                except Exception as copy_exc:  # noqa: BLE001
+                    if _is_protected_forward_error(copy_exc):
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "group_skipped_protected",
+                            group_id=grouped_id,
+                            count=len(message_ids),
+                            error=str(copy_exc),
+                        )
                         return
 
-                if _is_protected_forward_error(exc):
-                    try:
-                        await _copy_group_to_bot(data["target_bot"], [int(x) for x in data["messages"]], int(from_peer))
-                        log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(data["messages"]))
-                    except Exception as copy_exc:  # noqa: BLE001
-                        payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(copy_exc)}
-                        write_dlq(DLQ_PATH, payload)
-                        log_event(logger, logging.ERROR, "group_copy_failed", **payload)
-                else:
-                    payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
+                    payload = {"group_id": grouped_id, "messages": message_ids, "error": str(copy_exc)}
+                    write_dlq(DLQ_PATH, payload)
+                    log_event(logger, logging.ERROR, "group_copy_failed", **payload)
+                return
+
+            await rate_limiter.wait()
+            try:
+                await client.forward_messages(target_bot, message_ids, from_peer=from_peer)
+                log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(message_ids))
+                return
+            except Exception as exc:  # noqa: BLE001
+                # fall through to handle invalid/protected
+                pass
+
+            if _is_invalid_message_error(exc):
+                try:
+                    msgs = await client.get_messages(int(from_peer), ids=message_ids)
+                    msgs = [m for m in (list(msgs) if msgs else []) if m]
+                    ids = [int(m.id) for m in msgs]
+                    if ids:
+                        await client.forward_messages(target_bot, ids, from_peer=from_peer)
+                        log_event(logger, logging.INFO, "group_forwarded_partial", group_id=grouped_id, count=len(ids))
+                        return
+                except Exception as retry_exc:  # noqa: BLE001
+                    payload = {"group_id": grouped_id, "messages": message_ids, "error": str(retry_exc)}
                     write_dlq(DLQ_PATH, payload)
                     log_event(logger, logging.ERROR, "group_forward_failed", **payload)
-            finally:
-                del media_group_cache[grouped_id]
+                    return
+
+            if _is_protected_forward_error(exc):
+                try:
+                    await _copy_group_to_bot(target_bot, message_ids, int(from_peer), force_reupload=False)
+                    log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(message_ids), method="fallback")
+                except Exception as copy_exc:  # noqa: BLE001
+                    if _is_protected_forward_error(copy_exc):
+                        log_event(
+                            logger,
+                            logging.WARNING,
+                            "group_skipped_protected",
+                            group_id=grouped_id,
+                            count=len(message_ids),
+                            error=str(copy_exc),
+                        )
+                    else:
+                        payload = {"group_id": grouped_id, "messages": message_ids, "error": str(copy_exc)}
+                        write_dlq(DLQ_PATH, payload)
+                        log_event(logger, logging.ERROR, "group_copy_failed", **payload)
+            else:
+                payload = {"group_id": grouped_id, "messages": message_ids, "error": str(exc)}
+                write_dlq(DLQ_PATH, payload)
+                log_event(logger, logging.ERROR, "group_forward_failed", **payload)
+        finally:
+            del media_group_cache[grouped_id]
 
 
 async def join_chat(entity):
