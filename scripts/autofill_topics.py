@@ -222,8 +222,14 @@ async def _iter_topic_messages(client: TelegramClient, topic: TopicRef, *, limit
                 continue
 
             yield first
-            async for m in it:
+
+            while True:
+                try:
+                    m = await it.__anext__()
+                except StopAsyncIteration:
+                    break
                 yield m
+
             return
         except BadRequestError as exc:
             if _is_topic_id_invalid(exc):

@@ -99,6 +99,16 @@ docker compose run --rm userbot python scripts/list_topic_icons.py
 - 如果当天新内容不足，会从该 topic 的历史消息中随机挑选并重发
 - 使用 SQLite 记录最近使用过的消息，尽量均匀且减少重复
 
+如果某个 topic 还是空的（没有历史媒体），可以先用 `scripts/backfill_routes.py` 把来源频道的历史媒体“灌入”到对应 topic（基于 `relay.routes`）：
+
+```bash
+docker compose run --rm userbot python scripts/backfill_routes.py \
+  --source-chat-id <source_chat_id> \
+  --dest-chat-id <dest_supergroup_id> \
+  --only-topic-title "<topic_title>" \
+  --max-posts 20
+```
+
 一次性执行：
 
 ```bash
