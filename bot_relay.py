@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 
 from telethon import TelegramClient, events, functions, types, utils
 from telethon.tl.types import PeerChannel
@@ -42,14 +43,6 @@ BUILTIN_BLOCKLIST_SUBSTRINGS = [
     "春藥",
     "迷奸药",
     "迷奸藥",
-
-    "全球最快VPN",
-    "点击注册购买VPN",
-    "网黄尊享",
-    "新年特惠活动",
-    "⚠️群规必看",
-    "TG必 极搜",
-    "giveaway prizes",
 ]
 
 SRC_MARKER_PREFIX = "[[SRC:"
@@ -112,6 +105,43 @@ def _strip_source_marker(text: str) -> str:
     if end == -1:
         return text
     return t[end + len(SRC_MARKER_SUFFIX) :].lstrip()
+
+
+def _pick_post_caption(post_captions, chat_id: int) -> str:
+    if not post_captions:
+        return ""
+
+    value = post_captions
+    if isinstance(post_captions, dict):
+        value = post_captions.get(str(chat_id))
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, list):
+        items = [str(x) for x in value if x]
+        if not items:
+            return ""
+        return random.choice(items)
+
+    return ""
+
+
+def _media_filter_kwargs(s: dict) -> dict:
+    if bool(s.get("media_filter_use_general_blocklist", True)):
+        return {
+            "blocklist_substrings": BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or []),
+            "blocklist_regexes": s.get("blocklist_regexes") or [],
+            "block_contact_ads": bool(s.get("block_contact_ads", True)),
+            "contact_ad_keywords": s.get("contact_ad_keywords"),
+        }
+
+    return {
+        "blocklist_substrings": BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("media_blocklist_substrings") or []),
+        "blocklist_regexes": s.get("media_blocklist_regexes") or [],
+        "block_contact_ads": bool(s.get("media_block_contact_ads", False)),
+        "contact_ad_keywords": s.get("media_contact_ad_keywords") or s.get("contact_ad_keywords"),
+    }
 
 
 def _extract_source_peer_id(msg) -> int | None:
@@ -323,17 +353,22 @@ async def _send_to_destination(
             return False
 
     s = current_settings()
-    if s.get("strip_text"):
-        caption = ""
-    else:
-        caption = _strip_source_marker(_raw_message_text(msg))
 
     media = msg.media
     if isinstance(media, types.MessageMediaWebPage):
         media = None
 
-    if media is None and not caption:
+    # Always drop text-only messages.
+    if media is None:
         return False
+
+    override_caption = _pick_post_caption(s.get("post_captions"), chat_id)
+    if override_caption:
+        caption = override_caption
+    elif s.get("strip_text"):
+        caption = ""
+    else:
+        caption = _strip_source_marker(_raw_message_text(msg))
 
     await rate_limiter.wait()
     try:
@@ -358,7 +393,6 @@ async def _send_to_destination(
         raise
 
 
-
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler(event):
     sender = await event.get_sender()
@@ -373,32 +407,33 @@ async def handler(event):
         log_event(logger, logging.INFO, "system_reply_blocked", text=stripped_text)
         return
 
-    s = current_settings()
-    blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
+    msg = event.message
+    media = msg.media
+    if isinstance(media, types.MessageMediaWebPage):
+        media = None
 
-    filter_text = _strip_source_marker(_raw_message_text(event.message))
-    if should_block_text(
-        filter_text,
-        blocklist_substrings=blocklist,
-        blocklist_regexes=s.get("blocklist_regexes") or [],
-        block_contact_ads=bool(s.get("block_contact_ads", True)),
-        contact_ad_keywords=s.get("contact_ad_keywords"),
-    ):
-        log_event(logger, logging.INFO, "message_blocked", reason="blocklist", message_id=event.message.id)
+    if media is None and not msg.grouped_id:
         return
 
-    if event.message.grouped_id:
+    s = current_settings()
+
+    filter_text = _strip_source_marker(_raw_message_text(msg))
+    if should_block_text(filter_text, **_media_filter_kwargs(s)):
+        log_event(logger, logging.INFO, "message_blocked", reason="blocklist", message_id=msg.id)
+        return
+
+    if msg.grouped_id:
         async with media_group_lock:
-            gid = event.message.grouped_id
+            gid = msg.grouped_id
             if gid not in media_group_cache:
                 media_group_cache[gid] = {"messages": [], "task": None}
-            media_group_cache[gid]["messages"].append(event.message)
+            media_group_cache[gid]["messages"].append(msg)
             if media_group_cache[gid]["task"]:
                 media_group_cache[gid]["task"].cancel()
             media_group_cache[gid]["task"] = asyncio.create_task(process_media_group(gid))
-        log_event(logger, logging.INFO, "album_cached", group_id=event.message.grouped_id)
+        log_event(logger, logging.INFO, "album_cached", group_id=msg.grouped_id)
     else:
-        await send_copy(event.message)
+        await send_copy(msg)
 
 
 async def process_media_group(gid: int):
@@ -415,17 +450,13 @@ async def process_media_group(gid: int):
         original_caption = next((_raw_message_text(m) for m in msgs if _raw_message_text(m)), "")
 
         s = current_settings()
-        blocklist = BUILTIN_BLOCKLIST_SUBSTRINGS + list(s.get("blocklist_substrings") or [])
 
         album_text = "\n".join([_strip_source_marker(_raw_message_text(m)) for m in msgs if _raw_message_text(m)])
-        if should_block_text(
-            album_text,
-            blocklist_substrings=blocklist,
-            blocklist_regexes=s.get("blocklist_regexes") or [],
-            block_contact_ads=bool(s.get("block_contact_ads", True)),
-            contact_ad_keywords=s.get("contact_ad_keywords"),
-        ):
+        if should_block_text(album_text, **_media_filter_kwargs(s)):
             log_event(logger, logging.INFO, "album_blocked", reason="blocklist", group_id=gid)
+            return
+
+        if not media:
             return
 
         source_peer_id = None
@@ -436,11 +467,6 @@ async def process_media_group(gid: int):
 
         source_title = await _source_title(source_peer_id, msgs[0])
         destinations = _resolve_destinations_for_source(source_peer_id)
-
-        caption = "" if s.get("strip_text") else _strip_source_marker(original_caption or "")
-
-        if not media and not caption:
-            return
 
         for dest in destinations:
             chat_id = int(dest.get("chat_id"))
@@ -470,6 +496,14 @@ async def process_media_group(gid: int):
                 if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
                     log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
                     continue
+
+            override_caption = _pick_post_caption(s.get("post_captions"), chat_id)
+            if override_caption:
+                caption = override_caption
+            elif s.get("strip_text"):
+                caption = ""
+            else:
+                caption = _strip_source_marker(original_caption or "")
 
             await rate_limiter.wait()
             try:
@@ -513,7 +547,6 @@ async def send_copy(msg):
             payload = {"chat_id": int(dest.get("chat_id")), "message_id": msg.id, "error": str(exc)}
             write_dlq(DLQ_PATH, payload)
             log_event(logger, logging.ERROR, "message_send_failed", **payload)
-
 
 
 async def ensure_forum_topics_on_startup():

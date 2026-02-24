@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+import random
 import re
 import shutil
 import sqlite3
@@ -46,21 +47,6 @@ CREATE TABLE IF NOT EXISTS topic_scan2 (
 
 
 AUTOFILL_BUILTIN_BLOCKLIST_SUBSTRINGS = [
-    "新年特惠活动",
-    "网黄尊享",
-    "全球最快VPN",
-    "点击注册购买VPN",
-    "giveaway prizes",
-    "季付：￥",
-    "年付：￥",
-    "买一送一",
-    "活动优惠",
-    "活动时间",
-    "价格直降",
-    "加入会员私信联系",
-    "备用群https://t.me/",
-    "自用 VPN 仅需",
-
     # drug / med ads
     "rush",
     "poppers",
@@ -181,33 +167,26 @@ def _media_for_repost(msg):
     return None
 
 
-def _build_filter_settings(cfg: dict, ignore_text_filters: bool = False) -> dict:
+def _build_filter_settings(cfg: dict) -> dict:
     relay = cfg.get("relay") or {}
 
-    blocklist_substrings = AUTOFILL_BUILTIN_BLOCKLIST_SUBSTRINGS + list(relay.get("blocklist_substrings") or [])
+    blocklist_substrings = AUTOFILL_BUILTIN_BLOCKLIST_SUBSTRINGS + list(relay.get("autofill_blocklist_substrings") or [])
 
-    # NOTE: autofill reposts media without captions, so blocking "contact ads" based on caption text
-    # is often too aggressive and can result in zero candidates. Default to False for autofill.
     block_contact_ads = relay.get("autofill_block_contact_ads")
     if block_contact_ads is None:
         block_contact_ads = False
 
     return {
         "blocklist_substrings": blocklist_substrings,
-        "blocklist_regexes": relay.get("blocklist_regexes") or [],
+        "blocklist_regexes": relay.get("autofill_blocklist_regexes") or [],
         "block_contact_ads": bool(block_contact_ads),
-        "contact_ad_keywords": relay.get("contact_ad_keywords"),
-        "_ignore_text_filters": bool(ignore_text_filters),
+        "contact_ad_keywords": relay.get("autofill_contact_ad_keywords") or relay.get("contact_ad_keywords"),
     }
 
 
 def _should_skip_message(msg, filter_settings: dict) -> bool:
     if _media_for_repost(msg) is None:
-        # skip anything that isn't an image/video (including text-only and link previews)
         return True
-
-    if bool(filter_settings.get("_ignore_text_filters")):
-        return False
 
     text = _raw_message_text(msg)
     if text and should_block_text(
@@ -233,8 +212,8 @@ async def _count_today_messages(
     try:
         async for m in client.iter_messages(
             topic.chat_id,
-            # For forums, Telethon expects the topic's thread id here (topic.id)
-            reply_to=topic.topic_id,
+            # For forums, messages in the topic are replies to the topic's top_message.
+            reply_to=topic.top_message,
             limit=max(int(need) * 3, 50),
         ):
             if not getattr(m, "date", None):
@@ -255,7 +234,8 @@ async def _count_today_messages(
 
 
 def _topic_key(topic: TopicRef) -> int:
-    return int(topic.topic_id)
+    # Use top_message as the stable thread id for forum topics.
+    return int(topic.top_message)
 
 
 def _get_scan_state(conn: sqlite3.Connection, topic: TopicRef) -> tuple[int, bool]:
@@ -291,9 +271,6 @@ async def _scan_candidates(
     max_total: int,
     filter_settings: dict,
     self_user_id: int | None,
-    *,
-    debug: bool = False,
-    debug_limit: int = 20,
 ) -> None:
     offset_id, done = _get_scan_state(conn, topic)
     topic_key = _topic_key(topic)
@@ -303,8 +280,6 @@ async def _scan_candidates(
         (topic.chat_id, topic_key),
     ).fetchone()[0]
 
-    # If a previous run (or older buggy version) marked this topic as done but we have no candidates,
-    # reset scan state and try again.
     if done and int(existing_total) <= 0:
         offset_id = 0
         done = False
@@ -322,58 +297,17 @@ async def _scan_candidates(
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
         return
 
-    print(
-        f"scan_start: chat_id={topic.chat_id} title={topic.title!r} topic_id={topic.topic_id} offset_id={int(offset_id)} limit={int(limit)} existing={int(existing_total)}",
-        flush=True,
-    )
-
     min_seen_id = None
-    scanned = 0
-    kept = 0
 
     try:
-        async for m in client.iter_messages(
-            topic.chat_id,
-            reply_to=topic.topic_id,
-            limit=limit,
-            offset_id=offset_id,
-        ):
-            scanned += 1
+        async for m in client.iter_messages(topic.chat_id, reply_to=topic.top_message, limit=limit, offset_id=offset_id):
             if min_seen_id is None or int(m.id) < int(min_seen_id):
                 min_seen_id = int(m.id)
 
             if self_user_id is not None and getattr(m, "sender_id", None) == int(self_user_id):
-                if debug and int(scanned) <= int(debug_limit):
-                    print(
-                        f"scan_skip: chat_id={topic.chat_id} title={topic.title!r} message_id={int(m.id)} reason=self",
-                        flush=True,
-                    )
                 continue
 
             if _should_skip_message(m, filter_settings):
-                if debug and int(scanned) <= int(debug_limit):
-                    media = _media_for_repost(m)
-                    text = _raw_message_text(m)
-
-                    if media is None:
-                        reason = "no_media"
-                    elif bool(filter_settings.get("_ignore_text_filters")):
-                        reason = "other"
-                    elif text and should_block_text(
-                        text,
-                        blocklist_substrings=filter_settings.get("blocklist_substrings"),
-                        blocklist_regexes=filter_settings.get("blocklist_regexes"),
-                        block_contact_ads=bool(filter_settings.get("block_contact_ads", True)),
-                        contact_ad_keywords=filter_settings.get("contact_ad_keywords"),
-                    ):
-                        reason = "blocked_text"
-                    else:
-                        reason = "other"
-
-                    print(
-                        f"scan_skip: chat_id={topic.chat_id} title={topic.title!r} message_id={int(m.id)} reason={reason}",
-                        flush=True,
-                    )
                 continue
 
             msg_date = int(m.date.timestamp()) if getattr(m, "date", None) else None
@@ -381,24 +315,12 @@ async def _scan_candidates(
                 "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
                 (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
             )
-            kept += 1
-
-            if scanned % 100 == 0:
-                print(
-                    f"scan_progress: chat_id={topic.chat_id} title={topic.title!r} scanned={int(scanned)} kept={int(kept)}",
-                    flush=True,
-                )
     except BadRequestError as exc:
         if _is_topic_id_invalid(exc):
             raise TopicInvalidError(str(exc)) from exc
         raise
 
     conn.commit()
-
-    print(
-        f"scan_end: chat_id={topic.chat_id} title={topic.title!r} scanned={int(scanned)} kept={int(kept)}",
-        flush=True,
-    )
 
     if min_seen_id is None:
         _set_scan_state(conn, topic, offset_id=offset_id, done=True)
@@ -446,7 +368,39 @@ def _pick_candidate(conn: sqlite3.Connection, topic: TopicRef, now_ts: int, look
     return int(row[0])
 
 
-async def _repost_message(client: TelegramClient, topic: TopicRef, message_id: int, filter_settings: dict) -> bool:
+def _pick_autofill_caption(cfg: dict, chat_id: int) -> str:
+    relay = cfg.get("relay") or {}
+
+    captions = relay.get("autofill_captions")
+    if captions is None:
+        captions = relay.get("post_captions")
+
+    if not captions:
+        return ""
+
+    value = captions
+    if isinstance(captions, dict):
+        value = captions.get(str(chat_id))
+
+    if isinstance(value, str):
+        return value
+
+    if isinstance(value, list):
+        items = [str(x) for x in value if x]
+        if not items:
+            return ""
+        return random.choice(items)
+
+    return ""
+
+
+async def _repost_message(
+    client: TelegramClient,
+    topic: TopicRef,
+    message_id: int,
+    filter_settings: dict,
+    caption: str,
+) -> bool:
     msg = await client.get_messages(topic.chat_id, ids=message_id)
     if not msg:
         return False
@@ -458,24 +412,18 @@ async def _repost_message(client: TelegramClient, topic: TopicRef, message_id: i
     if media is None:
         return False
 
+    caption = str(caption or "")
+
     try:
-        await client.send_message(topic.chat_id, message="", file=media, reply_to=topic.top_message)
+        await client.send_file(topic.chat_id, media, caption=caption, reply_to=topic.top_message)
         return True
     except ChatForwardsRestrictedError:
         tmpdir = tempfile.mkdtemp(prefix="autofill_")
         try:
-            try:
-                path = await client.download_media(msg, file=tmpdir)
-            except Exception as exc:  # noqa: BLE001
-                print(
-                    f"skip repost (download_failed): chat_id={topic.chat_id} title={topic.title!r} message_id={message_id} error={exc}"
-                )
-                return False
-
+            path = await client.download_media(msg, file=tmpdir)
             if not path:
                 return False
-
-            await client.send_file(topic.chat_id, path, caption="", reply_to=topic.top_message)
+            await client.send_file(topic.chat_id, path, caption=caption, reply_to=topic.top_message)
             return True
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
@@ -546,9 +494,7 @@ async def run_once(
     top_up_window: bool,
     force: bool,
     self_user_id: int | None,
-    *,
-    debug_scan: bool = False,
-    debug_scan_limit: int = 20,
+    cfg: dict,
 ) -> None:
     now_utc = datetime.now(timezone.utc)
 
@@ -562,22 +508,14 @@ async def run_once(
     posted = 0
 
     for topic in topics:
-        print(f"topic_check: chat_id={topic.chat_id} title={topic.title!r}", flush=True)
-
         if topic.topic_id <= 0 or topic.top_message <= 0:
             resolved = await _resolve_topic(client, topic.chat_id, topic.title)
             if not resolved:
                 print(f"skip topic (not found): chat_id={topic.chat_id} title={topic.title!r}")
                 continue
             topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
-            print(
-                f"topic_resolved: chat_id={topic.chat_id} title={topic.title!r} topic_id={topic.topic_id} top_message={topic.top_message}",
-                flush=True,
-            )
 
         mode_inactive = int(inactive_min) > 0
-        # In inactive mode we only check for activity within the last N minutes.
-        # Default behaviour: if there was any activity, do nothing; otherwise post fill_count.
         count_need = 1
         if force:
             count_need = 1
@@ -586,30 +524,15 @@ async def run_once(
         elif not mode_inactive:
             count_need = int(min_posts_per_topic_per_day)
 
-        have = None
-        for _ in range(2):
-            try:
-                have = await _count_today_messages(
-                    client,
-                    topic,
-                    day_start_utc=day_start_utc,
-                    need=int(count_need),
-                    filter_settings=filter_settings,
-                )
-                break
-            except TopicInvalidError:
-                resolved = await _resolve_topic(client, topic.chat_id, topic.title)
-                if not resolved:
-                    print(f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-                    have = None
-                    break
-                topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
-
-        if have is None:
-            continue
+        have = await _count_today_messages(
+            client,
+            topic,
+            day_start_utc=day_start_utc,
+            need=int(count_need),
+            filter_settings=filter_settings,
+        )
 
         if bool(mode_inactive) and not bool(force) and not bool(top_up_window):
-            # Any activity within the window means we leave the topic alone.
             if int(have) > 0:
                 continue
             missing = int(fill_count)
@@ -623,29 +546,17 @@ async def run_once(
         if missing <= 0:
             continue
 
-        scanned = False
-        for _ in range(2):
-            try:
-                await _scan_candidates(
-                    client,
-                    conn,
-                    topic,
-                    batch_size=scan_batch,
-                    max_total=max_scan_per_topic,
-                    filter_settings=filter_settings,
-                    self_user_id=self_user_id,
-                    debug=bool(debug_scan),
-                    debug_limit=int(debug_scan_limit),
-                )
-                scanned = True
-                break
-            except TopicInvalidError:
-                resolved = await _resolve_topic(client, topic.chat_id, topic.title)
-                if not resolved:
-                    break
-                topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
-
-        if not scanned:
+        try:
+            await _scan_candidates(
+                client,
+                conn,
+                topic,
+                batch_size=scan_batch,
+                max_total=max_scan_per_topic,
+                filter_settings=filter_settings,
+                self_user_id=self_user_id,
+            )
+        except TopicInvalidError:
             print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
             continue
 
@@ -659,10 +570,6 @@ async def run_once(
             print(f"skip topic (no candidates): chat_id={topic.chat_id} title={topic.title!r}")
             continue
 
-        print(
-            f"topic_fill: chat_id={topic.chat_id} title={topic.title!r} have={int(have)} missing={int(missing)} candidates={int(candidate_total)}"
-        )
-
         remaining = int(missing)
         attempts_left = max(remaining * 5, remaining)
 
@@ -672,20 +579,16 @@ async def run_once(
 
             pick = _pick_candidate(conn, topic, now_ts=now_ts, lookback_days=lookback_days)
             if pick is None:
-                print(f"stop topic (no candidate to repost): chat_id={topic.chat_id} title={topic.title!r}")
                 break
+
+            caption = _pick_autofill_caption(cfg, topic.chat_id)
 
             ok = False
             try:
-                ok = await _repost_message(client, topic, pick, filter_settings=filter_settings)
+                ok = await _repost_message(client, topic, pick, filter_settings=filter_settings, caption=caption)
             except FloodWaitError as e:
                 await asyncio.sleep(int(e.seconds) + 1)
-                ok = await _repost_message(client, topic, pick, filter_settings=filter_settings)
-            except BadRequestError as exc:
-                if _is_topic_id_invalid(exc):
-                    print(f"skip topic (send TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
-                    break
-                raise
+                ok = await _repost_message(client, topic, pick, filter_settings=filter_settings, caption=caption)
 
             _mark_used(conn, topic, pick, now_ts=now_ts)
             attempts_left -= 1
@@ -693,7 +596,6 @@ async def run_once(
             if not ok:
                 continue
 
-            print(f"reposted: chat_id={topic.chat_id} title={topic.title!r} message_id={int(pick)}")
             posted += 1
             remaining -= 1
             await asyncio.sleep(float(sleep_between_posts))
@@ -735,9 +637,6 @@ async def main():
 
     parser.add_argument("--only-chat-id", type=int, help="Only run topics in this chat_id")
     parser.add_argument("--only-topic-title", help="Only run a single topic title (exact match)")
-
-    parser.add_argument("--debug-scan", action="store_true", help="Print skip reasons for the first few scanned messages")
-    parser.add_argument("--debug-scan-limit", type=int, default=20, help="How many scanned messages to debug-print")
 
     parser.add_argument("--lookback-days", type=int, default=30, help="Avoid reposting the same source message within N days")
     parser.add_argument("--scan-batch", type=int, default=300, help="How many messages to scan per topic per run")
@@ -802,8 +701,7 @@ async def main():
                 top_up_window=bool(args.top_up_window),
                 force=bool(args.force),
                 self_user_id=self_user_id,
-                debug_scan=bool(args.debug_scan),
-                debug_scan_limit=int(args.debug_scan_limit),
+                cfg=cfg,
             )
 
             if not args.daemon:

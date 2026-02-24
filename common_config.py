@@ -109,6 +109,19 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
 
     fallback_to_general_topic = bool(relay.get("fallback_to_general_topic", True))
 
+    # Optional: override outgoing captions (e.g. promote your own links).
+    post_captions = relay.get("post_captions")
+
+    # Optional: use a different filter for media captions. Useful if you always strip/override
+    # captions and don't want spammy source captions to block otherwise good media.
+    media_filter_use_general_blocklist = bool(relay.get("media_filter_use_general_blocklist", True))
+    media_blocklist_substrings = relay.get("media_blocklist_substrings") or []
+    media_blocklist_regexes = relay.get("media_blocklist_regexes") or []
+    media_block_contact_ads = relay.get("media_block_contact_ads")
+    if media_block_contact_ads is None:
+        media_block_contact_ads = False
+    media_contact_ad_keywords = relay.get("media_contact_ad_keywords")
+
     ensure_forum_topics = relay.get("ensure_forum_topics", [])
     forum_topic_top_messages = relay.get("forum_topic_top_messages", {})
 
@@ -128,6 +141,12 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "block_contact_ads": block_contact_ads,
         "contact_ad_keywords": contact_ad_keywords,
         "fallback_to_general_topic": fallback_to_general_topic,
+        "post_captions": post_captions,
+        "media_filter_use_general_blocklist": media_filter_use_general_blocklist,
+        "media_blocklist_substrings": media_blocklist_substrings,
+        "media_blocklist_regexes": media_blocklist_regexes,
+        "media_block_contact_ads": bool(media_block_contact_ads),
+        "media_contact_ad_keywords": media_contact_ad_keywords,
         "ensure_forum_topics": ensure_forum_topics,
         "forum_topic_top_messages": forum_topic_top_messages,
     }

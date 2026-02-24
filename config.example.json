@@ -15,6 +15,19 @@
 
     "strip_text": true,
 
+    "post_captions": {
+      "-1009876543210": "Your default caption here"
+    },
+
+    "media_filter_use_general_blocklist": true,
+    "media_blocklist_substrings": [],
+    "media_blocklist_regexes": [],
+    "media_block_contact_ads": false,
+
+    "autofill_blocklist_substrings": [],
+    "autofill_blocklist_regexes": [],
+    "autofill_block_contact_ads": false,
+
     "dest_channels": [-1009876543210],
     "default_destinations": [
       {"chat_id": -1009876543210, "bucket_topics": {"prefix": "Bucket ", "count": 5, "by": "message"}}

@@ -143,6 +143,21 @@
     "bot_token": "",
 
     "strip_text": true,
+
+    "post_captions": {
+      "-1002350290734": "This is my personal sexual exploration. See https://contacts.sexualwill.com for more info. Please help share my works 🙏🥺please\nBy the way, I collect and relay cool porns I found online. You can take a look https://t.me/hotasiangayporn\nP.S. Please help me subscribe to my fansone (free) so I could collaborate with others. 🥺🥺",
+      "-1002349398833": "這是光光的色色頻道，歡迎大家來一起色色，未滿十八歲請離開，拜託大家支持轉發分享訂閱，https://contacts.sexualwill.com\n另外光光蒐集了網上好看的片片，可以去看看喔！\nhttps://t.me/coolgayvid\n\nP.S. 幫忙光光訂閱我的FANSONE 讓我能跟別人合作~ 拜託 🥺🥺"
+    },
+
+    "media_filter_use_general_blocklist": false,
+    "media_blocklist_substrings": [],
+    "media_blocklist_regexes": [],
+    "media_block_contact_ads": false,
+
+    "autofill_blocklist_substrings": [],
+    "autofill_blocklist_regexes": [],
+    "autofill_block_contact_ads": false,
+
     "fallback_to_general_topic": false,
 
     "dest_channels": [-1002350290734, -1002349398833],
