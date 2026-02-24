@@ -109,6 +109,20 @@ docker compose run --rm userbot python scripts/backfill_routes.py \
   --max-posts 20
 ```
 
+如果你希望“某个来源频道/群在最近 N 分钟没有新内容时，就自动从该来源的历史里抽取旧媒体补发到对应 topic”，用：
+
+```bash
+docker compose run --rm userbot python scripts/autofill_inactive_sources.py \
+  --inactive-min 60 \
+  --fill-count 10 \
+  --lookback-days 30 \
+  --daemon --interval-min 60
+```
+
+它会读取：
+- `bot_mappings`（确定要监控/补发的来源）
+- `relay.routes` + `relay.default_destinations`（确定每个来源应投递到哪个目标 topic / bucket topic）
+
 一次性执行：
 
 ```bash

@@ -162,8 +162,8 @@
 
     "dest_channels": [-1002350290734, -1002349398833],
     "default_destinations": [
-      {"chat_id": -1002350290734, "bucket_topics": {"prefix": "🍑 Asian Porn ", "count": 5, "by": "message"}},
-      {"chat_id": -1002349398833, "bucket_topics": {"prefix": "🍑 分流好看片片", "count": 5, "by": "message"}}
+      {"chat_id": -1002350290734, "bucket_topics": {"prefix": "🍑 Asian Porn ", "count": 5, "by": "source"}},
+      {"chat_id": -1002349398833, "bucket_topics": {"prefix": "🍑 分流好看片片", "count": 5, "by": "source"}}
     ],
 
     "forum_topic_top_messages": {},

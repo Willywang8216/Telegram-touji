@@ -30,7 +30,7 @@
 
     "dest_channels": [-1009876543210],
     "default_destinations": [
-      {"chat_id": -1009876543210, "bucket_topics": {"prefix": "Bucket ", "count": 5, "by": "message"}}
+      {"chat_id": -1009876543210, "bucket_topics": {"prefix": "Bucket ", "count": 5, "by": "source"}}
     ],
 
     "forum_topic_top_messages": {

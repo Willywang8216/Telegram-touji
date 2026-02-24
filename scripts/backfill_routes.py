@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from telethon import TelegramClient, functions, types
 from telethon.errors import FloodWaitError
-from telethon.errors.rpcbaseerrors import BadRequestError
+
 from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError
 
 from common_config import ConfigManager, load_userbot_settings
