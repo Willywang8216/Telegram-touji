@@ -208,12 +208,11 @@ async def _count_today_messages(
     need: int,
     filter_settings: dict,
 ) -> int:
-    count = 0
-    try:
+    async def _run(reply_to: int) -> int:
+        count = 0
         async for m in client.iter_messages(
             topic.chat_id,
-            # For forums, messages in the topic are replies to the topic's top_message.
-            reply_to=topic.top_message,
+            reply_to=int(reply_to),
             limit=max(int(need) * 3, 50),
         ):
             if not getattr(m, "date", None):
@@ -225,17 +224,27 @@ async def _count_today_messages(
             count += 1
             if count >= need:
                 return count
-    except BadRequestError as exc:
-        if _is_topic_id_invalid(exc):
-            raise TopicInvalidError(str(exc)) from exc
-        raise
+        return count
 
-    return count
+    # Telethon/Telegram varies here across forums: some require `reply_to=topic.id`,
+    # others work with `reply_to=top_message`. Try both.
+    reply_to_candidates = [int(topic.topic_id), int(topic.top_message)]
+    for reply_to in reply_to_candidates:
+        if reply_to <= 0:
+            continue
+        try:
+            return await _run(reply_to)
+        except BadRequestError as exc:
+            if _is_topic_id_invalid(exc):
+                continue
+            raise
+
+    raise TopicInvalidError("TOPIC_ID_INVALID")
 
 
 def _topic_key(topic: TopicRef) -> int:
-    # Use top_message as the stable thread id for forum topics.
-    return int(topic.top_message)
+    # Use the forum thread id as the stable key for caching/scan state.
+    return int(topic.topic_id)
 
 
 def _get_scan_state(conn: sqlite3.Connection, topic: TopicRef) -> tuple[int, bool]:
@@ -299,8 +308,14 @@ async def _scan_candidates(
 
     min_seen_id = None
 
-    try:
-        async for m in client.iter_messages(topic.chat_id, reply_to=topic.top_message, limit=limit, offset_id=offset_id):
+    async def _run(reply_to: int) -> None:
+        nonlocal min_seen_id
+        async for m in client.iter_messages(
+            topic.chat_id,
+            reply_to=int(reply_to),
+            limit=limit,
+            offset_id=offset_id,
+        ):
             if min_seen_id is None or int(m.id) < int(min_seen_id):
                 min_seen_id = int(m.id)
 
@@ -315,10 +330,23 @@ async def _scan_candidates(
                 "INSERT OR IGNORE INTO candidates2(chat_id, topic_id, message_id, has_media, msg_date, last_used) VALUES(?,?,?,?,?,?)",
                 (topic.chat_id, topic_key, int(m.id), 1, msg_date, None),
             )
-    except BadRequestError as exc:
-        if _is_topic_id_invalid(exc):
-            raise TopicInvalidError(str(exc)) from exc
-        raise
+
+    reply_to_candidates = [int(topic.topic_id), int(topic.top_message)]
+    ran = False
+    for reply_to in reply_to_candidates:
+        if reply_to <= 0:
+            continue
+        try:
+            await _run(reply_to)
+            ran = True
+            break
+        except BadRequestError as exc:
+            if _is_topic_id_invalid(exc):
+                continue
+            raise
+
+    if not ran:
+        raise TopicInvalidError("TOPIC_ID_INVALID")
 
     conn.commit()
 
@@ -524,13 +552,27 @@ async def run_once(
         elif not mode_inactive:
             count_need = int(min_posts_per_topic_per_day)
 
-        have = await _count_today_messages(
-            client,
-            topic,
-            day_start_utc=day_start_utc,
-            need=int(count_need),
-            filter_settings=filter_settings,
-        )
+        have = None
+        for _ in range(2):
+            try:
+                have = await _count_today_messages(
+                    client,
+                    topic,
+                    day_start_utc=day_start_utc,
+                    need=int(count_need),
+                    filter_settings=filter_settings,
+                )
+                break
+            except TopicInvalidError:
+                resolved = await _resolve_topic(client, topic.chat_id, topic.title)
+                if not resolved:
+                    have = None
+                    break
+                topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
+
+        if have is None:
+            print(f"skip topic (TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
+            continue
 
         if bool(mode_inactive) and not bool(force) and not bool(top_up_window):
             if int(have) > 0:
@@ -546,17 +588,28 @@ async def run_once(
         if missing <= 0:
             continue
 
-        try:
-            await _scan_candidates(
-                client,
-                conn,
-                topic,
-                batch_size=scan_batch,
-                max_total=max_scan_per_topic,
-                filter_settings=filter_settings,
-                self_user_id=self_user_id,
-            )
-        except TopicInvalidError:
+        scanned = False
+        for _ in range(2):
+            try:
+                await _scan_candidates(
+                    client,
+                    conn,
+                    topic,
+                    batch_size=scan_batch,
+                    max_total=max_scan_per_topic,
+                    filter_settings=filter_settings,
+                    self_user_id=self_user_id,
+                )
+                scanned = True
+                break
+            except TopicInvalidError:
+                resolved = await _resolve_topic(client, topic.chat_id, topic.title)
+                if not resolved:
+                    scanned = False
+                    break
+                topic.topic_id, topic.top_message = int(resolved[0]), int(resolved[1])
+
+        if not scanned:
             print(f"skip topic (scan TOPIC_ID_INVALID): chat_id={topic.chat_id} title={topic.title!r}")
             continue
 
