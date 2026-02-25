@@ -9,6 +9,7 @@ from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from message_filter import should_block_text
 from structured_logger import get_logger, log_event
+from telethon_spam import group_looks_like_promo_directory, message_looks_like_promo_directory
 
 logger = get_logger("relaybot")
 config_manager = ConfigManager()
@@ -422,6 +423,13 @@ async def handler(event):
         log_event(logger, logging.INFO, "message_blocked", reason="blocklist", message_id=msg.id)
         return
 
+    if message_looks_like_promo_directory(msg):
+        log_event(logger, logging.INFO, "message_blocked", reason="promo_directory", message_id=msg.id)
+        return
+
+    if message_looks_like_promo_directory(msg):
+        log_event(logger, logging.INFO, "message_blocked", reason="promo_directory", message_id=msg.id)
+       
     if msg.grouped_id:
         async with media_group_lock:
             gid = msg.grouped_id
@@ -454,6 +462,10 @@ async def process_media_group(gid: int):
         album_text = "\n".join([_strip_source_marker(_raw_message_text(m)) for m in msgs if _raw_message_text(m)])
         if should_block_text(album_text, **_media_filter_kwargs(s)):
             log_event(logger, logging.INFO, "album_blocked", reason="blocklist", group_id=gid)
+            return
+
+        if group_looks_like_promo_directory(msgs):
+            log_event(logger, logging.INFO, "album_blocked", reason="promo_directory", group_id=gid)
             return
 
         if not media:

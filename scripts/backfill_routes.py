@@ -19,6 +19,7 @@ from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError
 
 from common_config import ConfigManager, load_userbot_settings
 from message_filter import should_block_text
+from telethon_spam import group_looks_like_promo_directory
 
 
 SCHEMA_SQL = """
@@ -351,6 +352,9 @@ async def backfill_one_destination(
                 media_items.append(media)
 
         if not media_items:
+            continue
+
+        if group_looks_like_promo_directory(msgs):
             continue
 
         album_text = "\n".join([_raw_message_text(m) for m in msgs if _raw_message_text(m)])

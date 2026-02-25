@@ -4,9 +4,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
+from telethon import types
 from telethon.events import NewMessage
 from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
+
+from telethon_spam import group_looks_like_promo_directory, message_looks_like_promo_directory
 
 from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
@@ -226,8 +229,11 @@ async def handler(event):
         msg = event.message
         if getattr(msg, "action", None) is not None:
             return
-        if getattr(msg, "message", None) is None and getattr(msg, "media", None) is None and not msg.grouped_id:
-            return
+
+        # Only forward real media. This avoids directory/promoting spam (often hidden as text links).
+        media = getattr(msg, "media", None)
+        if isinstance(media, types.MessageMediaWebPage):
+            media = None
 
         if msg.grouped_id:
             async with media_group_lock:
@@ -238,8 +244,15 @@ async def handler(event):
                 if media_group_cache[gid]["task"]:
                     media_group_cache[gid]["task"].cancel()
                 media_group_cache[gid]["task"] = asyncio.create_task(process_media_group(gid, event.chat_id))
-        else:
-            await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards)
+            return
+
+        if media is None:
+            return
+
+        if message_looks_like_promo_directory(msg):
+            return
+
+        await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards)
 
 
 async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int, force_reupload: bool = False):
@@ -247,7 +260,7 @@ async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int, f
     msgs = [m for m in (list(msgs) if msgs else []) if m]
     msgs.sort(key=lambda m: m.id)
 
-    files = [m.media for m in msgs if m.media is not None]
+    files = [m.media for m in msgs if m.media is not None and not isinstance(m.media, types.MessageMediaWebPage)]
     original_caption = next((m.message for m in msgs if getattr(m, "message", None)), "")
     caption = _src_marker(chat_id)
     if original_caption:
@@ -289,6 +302,27 @@ async def process_media_group(grouped_id, from_peer):
         message_ids = [int(x) for x in data["messages"]]
 
         try:
+            msgs = await client.get_messages(int(from_peer), ids=message_ids)
+            msgs = [m for m in (list(msgs) if msgs else []) if m]
+            msgs.sort(key=lambda m: m.id)
+
+            if not msgs:
+                return
+
+            if group_looks_like_promo_directory(msgs):
+                return
+
+            files = []
+            for m in msgs:
+                media = getattr(m, "media", None)
+                if isinstance(media, types.MessageMediaWebPage):
+                    continue
+                if media is not None:
+                    files.append(media)
+
+            if not files:
+                return
+
             if noforwards:
                 try:
                     await _copy_group_to_bot(target_bot, message_ids, int(from_peer), force_reupload=True)
@@ -321,8 +355,6 @@ async def process_media_group(grouped_id, from_peer):
 
             if _is_invalid_message_error(exc):
                 try:
-                    msgs = await client.get_messages(int(from_peer), ids=message_ids)
-                    msgs = [m for m in (list(msgs) if msgs else []) if m]
                     ids = [int(m.id) for m in msgs]
                     if ids:
                         await client.forward_messages(target_bot, ids, from_peer=from_peer)
