@@ -148,11 +148,17 @@ docker compose run --rm userbot python scripts/config_cli.py add-route \
 ```bash
 # 仅报告（dry-run）
 docker compose run --rm userbot python scripts/prune_invalid_config.py \
-  --prune-bot-mappings --prune-topic-mapping --prune-closed-topics
+  --prune-bot-mappings \
+  --prune-destinations \
+  --prune-topic-mapping --prune-closed-topics
 
-# 应用修改并写回 config.json（可选 --leave 尝试退出被移除的群/频道）
+# 应用修改并写回 config.json，并尝试自动退出（leave）被移除的 chats
+# 注意：要在同一次执行里加上 --leave，否则先 --write 移除了配置，第二次再跑就没有可 leave 的项目了。
 docker compose run --rm userbot python scripts/prune_invalid_config.py \
-  --prune-bot-mappings --prune-topic-mapping --prune-closed-topics --write
+  --prune-bot-mappings \
+  --prune-destinations \
+  --prune-topic-mapping --prune-closed-topics \
+  --write --leave
 ```
 
 （已有脚本）仅针对 topic 的缺失/关闭状态做检测与 prune（不会创建 topic）：
