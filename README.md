@@ -93,6 +93,22 @@ docker compose run --rm userbot python scripts/sync_forum_topics.py --rename --i
 docker compose run --rm userbot python scripts/list_topic_icons.py
 ```
 
+列出某个 supergroup 的 topic 列表（仅查询，不会创建/修改）：
+
+```bash
+docker compose run --rm userbot python scripts/list_topics.py --peer <supergroup_id_or_username>
+# 输出 JSON: {"topic_title": top_message, ...}
+docker compose run --rm userbot python scripts/list_topics.py --peer <peer> --json
+```
+
+列出 **当前 userbot 账号可见的所有** 开启 Topics（forum）的 supergroup，并列出它们的 topics（仅查询，不会创建/修改）：
+
+```bash
+docker compose run --rm userbot python scripts/list_topics.py --all-forums
+# 输出 JSON: [{peer_id,title,username,topics:{title: top_message}}, ...]
+docker compose run --rm userbot python scripts/list_topics.py --all-forums --json
+```
+
 ### 🗓️ Topic 日更保底（可选）
 
 `scripts/autofill_topics.py` 会把每个 topic 的“每日帖子数”补到指定数量：
