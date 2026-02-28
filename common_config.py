@@ -86,6 +86,7 @@ def load_userbot_settings(manager: ConfigManager) -> dict[str, Any]:
 def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     cfg = manager.load()
     relay = cfg.get("relay", {})
+
     api_id = _env_int("RELAY_API_ID", _env_int("API_ID", int(relay.get("api_id", cfg.get("api_id", 0)))))
     api_hash = _env_str("RELAY_API_HASH", _env_str("API_HASH", relay.get("api_hash", cfg.get("api_hash", ""))))
     bot_token = _env_str("RELAY_BOT_TOKEN", relay.get("bot_token", ""))
@@ -125,6 +126,24 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     ensure_forum_topics = relay.get("ensure_forum_topics", [])
     forum_topic_top_messages = relay.get("forum_topic_top_messages", {})
 
+    # Security: lock down who can DM the relay bot.
+    # - If RELAY_ALLOWED_SENDER_IDS is set, it takes precedence.
+    # - Else uses relay.allowed_sender_ids.
+    # - Else defaults to [master_account_id] (recommended).
+    allow_raw = _env_str("RELAY_ALLOWED_SENDER_IDS")
+    if allow_raw:
+        allowed_sender_ids = [int(x.strip()) for x in allow_raw.split(",") if x.strip()]
+    else:
+        allowed_sender_ids = [int(x) for x in (relay.get("allowed_sender_ids") or []) if str(x).strip()]
+
+    if not allowed_sender_ids:
+        try:
+            allowed_sender_ids = [int(cfg.get("master_account_id"))]
+        except Exception:  # noqa: BLE001
+            allowed_sender_ids = []
+
+    admin_user_ids = [int(x) for x in (relay.get("admin_user_ids") or allowed_sender_ids or []) if str(x).strip()]
+
     if not api_id or not api_hash or not bot_token or (not default_destinations and not routes):
         raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/(default_destinations|routes)")
 
@@ -149,4 +168,6 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "media_contact_ad_keywords": media_contact_ad_keywords,
         "ensure_forum_topics": ensure_forum_topics,
         "forum_topic_top_messages": forum_topic_top_messages,
+        "allowed_sender_ids": allowed_sender_ids,
+        "admin_user_ids": admin_user_ids,
     }

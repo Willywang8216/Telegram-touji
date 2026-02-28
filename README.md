@@ -2,7 +2,7 @@
 
 一个基于 **Telethon + Docker Compose** 的 Telegram 消息中继系统：
 - `telegram_bot.py`（Userbot）负责监听源频道/群
-- `bot_relay.py`（RelayBot）负责无痕重发到目标频道
+- `bot_relay.py`（RelayBot）负责无痕重发到目标频道/群（可投递到 forum topics）
 
 ---
 
@@ -15,11 +15,11 @@
 - 结构化 JSON 日志
 - 限流 + 重试 + 死信（DLQ）
 - 运行时配置热重载（检测 `config.json` 变更）
+- （安全）RelayBot 私聊白名单：只接受白名单用户的私聊消息（默认 `master_account_id`），防止陌生人私聊 bot 直接投递内容
 
 ---
 
 ## 🚀 一键安装（交互填写配置）
-
 
 ```bash
 REPO_URL="https://github.com/ike666888/Telegram-touji.git" \
@@ -47,6 +47,13 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `relay.bot_token`
 - `dest_channels`（逗号分隔，旧版兼容：无路由时会广播到这些频道/群）
 
+安全相关（新增）：
+- `relay.allowed_sender_ids`：RelayBot 私聊白名单（推荐填你的 `master_account_id`）
+  - 环境变数覆盖：`RELAY_ALLOWED_SENDER_IDS=123,456`
+
+环境变数覆盖（新增/补齐）：
+- `RELAY_DEST_CHANNELS`（逗号分隔）：覆盖 `relay.dest_channels`
+
 ### 🧵 Topics / 路由（可选）
 
 如果目标是带 Topics 的 supergroup（forum），可以用下面的字段把不同来源路由到不同 topic：
@@ -67,13 +74,6 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `ensure_forum_topics`: 用于 scripts/sync_forum_topics.py 预创建 topics 并写入映射
 - `forum_topic_top_messages`: 手动提供 topic 标题 -> top_message 映射（用于把消息投递到指定 topic）
   - 由于 Telegram 对 bot 的 MTProto 接口有限制，bot 账号在部分环境下无法调用 `GetForumTopicsRequest` 获取 topic 列表；此时需要用 userbot 生成映射并写入配置。
-  - 生成/写入映射：
-    ```bash
-    docker compose run --rm userbot python scripts/sync_forum_topics.py --write
-    ```
-    （使用 userbot 登录态创建缺失 topic，并把映射写回 `config.json`）
-- `topic_renames`: 批量重命名 topic（用于中英文不同标题、加 emoji 前缀）
-- `topic_icon_emojis`: 为 topic 设置 icon（使用默认 topic icon stickerset 里的 custom emoji，通过 emoji 进行映射）
 
 ### 🌐 Topic 标题本地化 / 重命名（可选）
 
@@ -245,5 +245,7 @@ python -m unittest discover -s tests -v
 python -m py_compile telegram_bot.py bot_relay.py common_config.py structured_logger.py delivery.py command_utils.py
 bash -n scripts/install.sh
 ```
+
+---
 
 ---

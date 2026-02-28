@@ -400,8 +400,17 @@ async def handler(event):
     if sender and sender.is_self:
         return
 
+    s = current_settings()
+    allowed = set(int(x) for x in (s.get("allowed_sender_ids") or []))
+    if allowed and int(event.sender_id) not in allowed:
+        # Private relay: ignore DMs from non-whitelisted users.
+        log_event(logger, logging.WARNING, "unauthorized_sender", sender_id=int(event.sender_id))
+        return
+
     stripped_text = (event.raw_text or "").strip()
     if stripped_text.startswith("/"):
+        # Keep relaybot command surface disabled by default.
+        # If you later add an admin UI, gate it by sender_id here.
         log_event(logger, logging.INFO, "command_blocked", text=stripped_text)
         return
     if stripped_text.startswith("🤖"):
