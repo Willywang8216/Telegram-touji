@@ -9,7 +9,7 @@ from common_config import ConfigManager, load_relay_settings, load_userbot_setti
 
 class TestCommonConfig(unittest.TestCase):
     def setUp(self):
-        # Tests should not depend on the caller environment (e.g. docker compose env_file).
+        # Tests should not depend on the caller environment (e.g. docker compose env_file or repo .env).
         self._saved_env = {}
         for key in [
             "API_ID",
@@ -28,7 +28,11 @@ class TestCommonConfig(unittest.TestCase):
             self._saved_env[key] = os.environ.get(key)
             os.environ.pop(key, None)
 
+        self._saved_cwd = os.getcwd()
         self.tmp = tempfile.TemporaryDirectory()
+        # Prevent ConfigManager._load_dotenv() from reading /app/.env by changing CWD.
+        os.chdir(self.tmp.name)
+
         self.path = Path(self.tmp.name) / "config.json"
         self.path.write_text(
             json.dumps(
@@ -50,7 +54,11 @@ class TestCommonConfig(unittest.TestCase):
         )
 
     def tearDown(self):
-        self.tmp.cleanup()
+        try:
+            os.chdir(self._saved_cwd)
+        finally:
+            self.tmp.cleanup()
+
         for key, value in self._saved_env.items():
             if value is None:
                 os.environ.pop(key, None)

@@ -254,7 +254,6 @@ cp .env.example .env
 docker compose run --rm userbot python -m unittest discover -s tests -v
 
 # 语法检查（py_compile）
-docker compose run --rm userbot python -m py_compile telegram_bot.py bot_relay.py admin_bot.py common_config.py structured_logger.py delivery.py command_utils.py
-
-# shell 脚本语法检查（本镜像是 python:slim，可能没有 b</old_code><new_code>docker run --rm -v "$PWD":/app -w /app bash:5 bash -n scripts/install.sh
+docker compose run --rm userbot python -m py_compile telegram_bot.py bot_relay.py admin_bot.py common_config.py structured_logger.py delivery.</old_code><new_code># shell 脚本语法检查（本镜像是 python:slim，可能没有 bash；用 bash 官方镜像跑 -n）
+docker run --rm -v "$PWD":/app -w /app bash:5 bash -n scripts/install.sh
 ```
