@@ -145,8 +145,8 @@
     "strip_text": true,
 
     "post_captions": {
-      "-1002350290734": "This is my personal sexual exploration. See https://contacts.sexualwill.com for more info. Please help share my works 🙏🥺please\nBy the way, I collect and relay cool porns I found online. You can take a look https://t.me/hotasiangayporn\nP.S. Please help me subscribe to my fansone (free) so I could collaborate with others. 🥺🥺",
-      "-1002349398833": "這是光光的色色頻道，歡迎大家來一起色色，未滿十八歲請離開，拜託大家支持轉發分享訂閱，https://contacts.sexualwill.com\n另外光光蒐集了網上好看的片片，可以去看看喔！\nhttps://t.me/coolgayvid\n\nP.S. 幫忙光光訂閱我的FANSONE 讓我能跟別人合作~ 拜託 🥺🥺"
+      "-1002350290734": "It’s me SexualWill, Sexual Side of Nakedwill. I’m glad for you to be here. See https://contacts.sexualwill.com for more info. Please help share my works 🙏🥺please\n\nBy the way, I collect and relay cool porns I found online. It’s https://t.me/coolhotgayporn\n\nP.S. Please help me subscribe to my fansone (free) so I could collaborate with others. 🥺🥺\n\nhttps://fansone.co/nakedwei",
+      "-1002349398833": "這是光光的色色頻道，歡迎大家來一起色色，未滿十八歲請離開，拜託大家支持轉發分享訂閱，https://contacts.sexualwill.com 另外光光蒐集了網上好看的片片，可以去看看喔，別忘了分享喔！https://t.me/coolgayvid\nP.S. 幫忙光光訂閱我的FANSONE 讓我能跟別人合作~ 拜託 🥺🥺 https://fansone.co/nakedwei"
     },
 
     "media_filter_use_general_blocklist": false,
@@ -162,25 +162,39 @@
 
     "dest_channels": [-1002350290734, -1002349398833],
     "default_destinations": [
-      {"chat_id": -1002350290734, "bucket_topics": {"prefix": "🍑 Asian Porn ", "count": 5, "by": "source"}},
-      {"chat_id": -1002349398833, "bucket_topics": {"prefix": "🍑 分流好看片片", "count": 5, "by": "source"}}
+      {"chat_id": -1002350290734, "topic_title": "Default Rout"},
+      {"chat_id": -1002349398833, "topic_title": "大雜燴"}
     ],
 
     "forum_topic_top_messages": {},
+
+    "fallback_topic_titles": {
+      "-1002349398833": "大雜燴",
+      "-1002350290734": "Default Rout"
+    },
+
+    "topic_deletes": {
+      "-1002350290734": ["🇺🇸 English"],
+      "-1002349398833": ["🇹🇼 中文（繁體）"]
+    },
+
+    "chat_title_renames": {
+      "-1002350290734": "Cool Gay Porn"
+    },
 
     "routes": [
       {
         "source_chats": [-1001514501094],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "🐻 Asian bear"},
-          {"chat_id": -1002349398833, "topic_title": "🐻 亞洲熊"}
+          {"chat_id": -1002349398833, "topic_title": "🐻 大號熊熊"}
         ]
       },
       {
         "source_chats": [-1001687156607, -1001667507136, -1002217337055, -1001348978258, -1002520119538, -1002540419212, -1001196731716],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "🧜 Asian Ladyboy"},
-          {"chat_id": -1002349398833, "topic_title": "🧜 亞洲人妖"}
+          {"chat_id": -1002349398833, "topic_title": "🧜 偽娘南娘瑟瑟"}
         ]
       },
       {
@@ -211,13 +225,13 @@
         ],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "🌍 Gay Westerner"},
-          {"chat_id": -1002349398833, "topic_title": "🌍 西方男同志"}
+          {"chat_id": -1002349398833, "topic_title": "🌍 歐美GAY"}
         ]
       },
       {
         "source_chats": [-1001331643461],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "📼 Old Gay Porn"},
+          {"chat_id": -1002350290734, "topic_title": "📼 Retro gay porn"},
           {"chat_id": -1002349398833, "topic_title": "📼 復古男同志片"}
         ]
       },
@@ -225,14 +239,14 @@
         "source_chats": [-1001653838131, -1001715232027],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "🔒 Gay Chastity"},
-          {"chat_id": -1002349398833, "topic_title": "🔒 男同志貞操鎖"}
+          {"chat_id": -1002349398833, "topic_title": "🔒 鎖雞雞"}
         ]
       },
       {
         "source_chats": [-1002834942876],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "✋ Spank Fetish"},
-          {"chat_id": -1002349398833, "topic_title": "✋ 打屁股癖"}
+          {"chat_id": -1002349398833, "topic_title": "✋ 不乖打屁屁"}
         ]
       },
       {
@@ -251,7 +265,7 @@
         ],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "👀 Gay Exhibitionism/Voyeur"},
-          {"chat_id": -1002349398833, "topic_title": "👀 男同志露出／偷窺"}
+          {"chat_id": -1002349398833, "topic_title": "👀 戶外野裸露出"}
         ]
       }
     ],
@@ -260,8 +274,8 @@
       {
         "chat_id": -1002350290734,
         "topics": [
-          "🇺🇸 English",
           "🇹🇼 中文（繁體）",
+          "Default Rout",
           "🍑 Asian Porn 1",
           "🍑 Asian Porn 2",
           "🍑 Asian Porn 3",
@@ -271,7 +285,7 @@
           "🐻 Asian bear",
           "🧜 Asian Ladyboy",
           "🌍 Gay Westerner",
-          "📼 Old Gay Porn",
+          "📼 Retro gay porn",
           "🔒 Gay Chastity",
           "✋ Spank Fetish",
           "👀 Gay Exhibitionism/Voyeur"
@@ -280,28 +294,27 @@
       {
         "chat_id": -1002349398833,
         "topics": [
+          "大雜燴",
           "🇺🇸 英文區",
-          "🇹🇼 中文（繁體）",
           "🍑 分流好看片片1",
           "🍑 分流好看片片2",
           "🍑 分流好看片片3",
           "🍑 分流好看片片4",
           "🍑 分流好看片片5",
           "🇯🇵 日本專業片",
-          "🐻 亞洲熊",
-          "🧜 亞洲人妖",
-          "🌍 西方男同志",
+          "🐻 大號熊熊",
+          "🧜 偽娘南娘瑟瑟",
+          "🌍 歐美GAY",
           "📼 復古男同志片",
-          "🔒 男同志貞操鎖",
-          "✋ 打屁股癖",
-          "👀 男同志露出／偷窺"
+          "🔒 鎖雞雞",
+          "✋ 不乖打屁屁",
+          "👀 戶外野裸露出"
         ]
       }
     ],
 
     "topic_renames": {
       "-1002350290734": {
-        "English speaker": "🇺🇸 English",
         "Mandarin Chinese speaker": "🇹🇼 中文（繁體）",
         "Asian Porn 1": "🍑 Asian Porn 1",
         "Asian Porn 2": "🍑 Asian Porn 2",
@@ -312,16 +325,15 @@
         "Asian bear": "🐻 Asian bear",
         "Asian Ladyboy": "🧜 Asian Ladyboy",
         "Gay Westerner": "🌍 Gay Westerner",
-        "Old Gay Porn": "📼 Old Gay Porn",
+        "Old Gay Porn": "📼 Retro gay porn",
+        "📼 Old Gay Porn": "📼 Retro gay porn",
         "Gay Chastity": "🔒 Gay Chastity",
         "Spank Fetish": "✋ Spank Fetish",
         "Gay Exhibitionism/Voyeur": "👀 Gay Exhibitionism/Voyeur"
       },
       "-1002349398833": {
         "English speaker": "🇺🇸 英文區",
-        "Mandarin Chinese speaker": "🇹🇼 中文（繁體）",
         "英文區": "🇺🇸 英文區",
-        "中文（繁體）": "🇹🇼 中文（繁體）",
         "分流好看片片1": "🍑 分流好看片片1",
         "分流好看片片2": "🍑 分流好看片片2",
         "分流好看片片3": "🍑 分流好看片片3",
@@ -329,27 +341,33 @@
         "分流好看片片5": "🍑 分流好看片片5",
         "Professional Japan Porn": "🇯🇵 日本專業片",
         "日本專業片": "🇯🇵 日本專業片",
-        "Asian bear": "🐻 亞洲熊",
-        "亞洲熊": "🐻 亞洲熊",
-        "Asian Ladyboy": "🧜 亞洲人妖",
-        "亞洲人妖": "🧜 亞洲人妖",
-        "Gay Westerner": "🌍 西方男同志",
-        "西方男同志": "🌍 西方男同志",
+        "Asian bear": "🐻 大號熊熊",
+        "亞洲熊": "🐻 大號熊熊",
+        "🐻 亞洲熊": "🐻 大號熊熊",
+        "Asian Ladyboy": "🧜 偽娘南娘瑟瑟",
+        "亞洲人妖": "🧜 偽娘南娘瑟瑟",
+        "🧜 亞洲人妖": "🧜 偽娘南娘瑟瑟",
+        "Gay Westerner": "🌍 歐美GAY",
+        "西方男同志": "🌍 歐美GAY",
+        "🌍 西方男同志": "🌍 歐美GAY",
         "Old Gay Porn": "📼 復古男同志片",
         "復古男同志片": "📼 復古男同志片",
-        "Gay Chastity": "🔒 男同志貞操鎖",
-        "男同志貞操鎖": "🔒 男同志貞操鎖",
-        "Spank Fetish": "✋ 打屁股癖",
-        "打屁股癖": "✋ 打屁股癖",
-        "Gay Exhibitionism/Voyeur": "👀 男同志露出／偷窺",
-        "男同志露出／偷窺": "👀 男同志露出／偷窺"
+        "Gay Chastity": "🔒 鎖雞雞",
+        "男同志貞操鎖": "🔒 鎖雞雞",
+        "🔒 男同志貞操鎖": "🔒 鎖雞雞",
+        "Spank Fetish": "✋ 不乖打屁屁",
+        "打屁股癖": "✋ 不乖打屁屁",
+        "✋ 打屁股癖": "✋ 不乖打屁屁",
+        "Gay Exhibitionism/Voyeur": "👀 戶外野裸露出",
+        "男同志露出／偷窺": "👀 戶外野裸露出",
+        "👀 男同志露出／偷窺": "👀 戶外野裸露出"
       }
     },
 
     "topic_icon_emojis": {
       "-1002350290734": {
-        "🇺🇸 English": "🇺🇸",
         "🇹🇼 中文（繁體）": "🇹🇼",
+        "Default Rout": "🧭",
         "🍑 Asian Porn 1": "🍑",
         "🍑 Asian Porn 2": "🍑",
         "🍑 Asian Porn 3": "🍑",
@@ -359,27 +377,27 @@
         "🐻 Asian bear": "🐻",
         "🧜 Asian Ladyboy": "🧜",
         "🌍 Gay Westerner": "🌍",
-        "📼 Old Gay Porn": "📼",
+        "📼 Retro gay porn": "📼",
         "🔒 Gay Chastity": "🔒",
         "✋ Spank Fetish": "✋",
         "👀 Gay Exhibitionism/Voyeur": "👀"
       },
       "-1002349398833": {
+        "大雜燴": "🍑",
         "🇺🇸 英文區": "🇺🇸",
-        "🇹🇼 中文（繁體）": "🇹🇼",
         "🍑 分流好看片片1": "🍑",
         "🍑 分流好看片片2": "🍑",
         "🍑 分流好看片片3": "🍑",
         "🍑 分流好看片片4": "🍑",
         "🍑 分流好看片片5": "🍑",
         "🇯🇵 日本專業片": "🇯🇵",
-        "🐻 亞洲熊": "🐻",
-        "🧜 亞洲人妖": "🧜",
-        "🌍 西方男同志": "🌍",
+        "🐻 大號熊熊": "🐻",
+        "🧜 偽娘南娘瑟瑟": "🧜",
+        "🌍 歐美GAY": "🌍",
         "📼 復古男同志片": "📼",
-        "🔒 男同志貞操鎖": "🔒",
-        "✋ 打屁股癖": "✋",
-        "👀 男同志露出／偷窺": "👀"
+        "🔒 鎖雞雞": "🔒",
+        "✋ 不乖打屁屁": "✋",
+        "👀 戶外野裸露出": "👀"
       }
     },
 

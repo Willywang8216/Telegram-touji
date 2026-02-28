@@ -126,6 +126,12 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     ensure_forum_topics = relay.get("ensure_forum_topics", [])
     forum_topic_top_messages = relay.get("forum_topic_top_messages", {})
 
+    fallback_topic_titles = relay.get("fallback_topic_titles")
+    if fallback_topic_titles is None:
+        fallback_topic_titles = relay.get("fallback_topics")
+    if not isinstance(fallback_topic_titles, dict):
+        fallback_topic_titles = {}
+
     # Security: lock down who can DM the relay bot.
     # - If RELAY_ALLOWED_SENDER_IDS is set, it takes precedence.
     # - Else uses relay.allowed_sender_ids.
@@ -168,6 +174,7 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "media_contact_ad_keywords": media_contact_ad_keywords,
         "ensure_forum_topics": ensure_forum_topics,
         "forum_topic_top_messages": forum_topic_top_messages,
+        "fallback_topic_titles": fallback_topic_titles,
         "allowed_sender_ids": allowed_sender_ids,
         "admin_user_ids": admin_user_ids,
     }

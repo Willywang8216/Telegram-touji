@@ -118,6 +118,34 @@ async def apply_topic_renames(client: TelegramClient, peer, renames: dict[str, s
             raise
 
 
+async def apply_topic_deletes(client: TelegramClient, peer, delete_titles: list[str]) -> None:
+    if not delete_titles:
+        return
+
+    for title in delete_titles:
+        if not title:
+            continue
+
+        entity, topic = await find_topic(client, peer, str(title))
+        if not topic:
+            continue
+
+        # Deleting a forum topic is done by deleting its history using the topic top message id.
+        await client(functions.messages.DeleteTopicHistoryRequest(peer=entity, top_msg_id=int(topic.top_message)))
+
+
+async def apply_chat_title_renames(client: TelegramClient, chat_title_renames: dict[str, str]) -> None:
+    if not chat_title_renames:
+        return
+
+    for peer, new_title in chat_title_renames.items():
+        if not peer or not new_title:
+            continue
+
+        entity = await client.get_entity(int(peer))
+        await client(functions.channels.EditTitleRequest(channel=entity, title=str(new_title)))
+
+
 async def apply_topic_icons(
     client: TelegramClient,
     peer,
@@ -203,6 +231,8 @@ async def main():
     parser.add_argument("--write", action="store_true", help="Write mapping into relay.forum_topic_top_messages")
     parser.add_argument("--rename", action="store_true", help="Apply relay.topic_renames before syncing")
     parser.add_argument("--icons", action="store_true", help="Apply relay.topic_icon_emojis (default icon pack)")
+    parser.add_argument("--delete", action="store_true", help="Apply relay.topic_deletes before syncing")
+    parser.add_argument("--rename-chats", action="store_true", help="Apply relay.chat_title_renames")
     args = parser.parse_args()
 
     config_manager = ConfigManager(args.config)
@@ -223,6 +253,12 @@ async def main():
         out: dict[str, dict[str, int]] = {}
         renames_cfg = relay.get("topic_renames") or {}
         icons_cfg = relay.get("topic_icon_emojis") or {}
+        deletes_cfg = relay.get("topic_deletes") or {}
+
+        if args.rename_chats:
+            chat_title_renames = relay.get("chat_title_renames") or {}
+            if isinstance(chat_title_renames, dict) and chat_title_renames:
+                await apply_chat_title_renames(client, {str(k): str(v) for k, v in chat_title_renames.items()})
 
         default_icon_ids: dict[str, int] = {}
         if args.icons:
@@ -235,6 +271,11 @@ async def main():
                 continue
 
             peer = int(chat_id)
+
+            if args.delete:
+                chat_deletes = deletes_cfg.get(str(peer)) or deletes_cfg.get(peer) or []
+                if isinstance(chat_deletes, list) and chat_deletes:
+                    await apply_topic_deletes(client, peer, [str(x) for x in chat_deletes if x])
 
             if args.rename:
                 chat_renames = renames_cfg.get(str(peer)) or renames_cfg.get(peer) or {}

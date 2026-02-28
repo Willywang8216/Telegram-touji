@@ -223,6 +223,44 @@ def _preconfigured_topic_top_message(chat_id: int, title: str) -> int | None:
     return None
 
 
+def _fallback_topic_title(chat_id: int) -> str | None:
+    s = current_settings()
+    mapping = s.get("fallback_topic_titles") or {}
+    if not isinstance(mapping, dict):
+        return None
+
+    for key in (str(chat_id), chat_id):
+        if key in mapping:
+            value = mapping.get(key)
+            if value:
+                return str(value)
+            return None
+
+    return None
+
+
+async def _send_media_with_caption(chat_id: int, media, caption: str, reply_to: int | None, *, action: str) -> None:
+    try:
+        await with_retry(
+            lambda: client.send_message(chat_id, message=caption, file=media, reply_to=reply_to),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action=action,
+        )
+    except Exception as exc:  # noqa: BLE001
+        if media is not None and _is_send_videos_forbidden(exc):
+            await with_retry(
+                lambda: client.send_file(chat_id, media, caption=caption, reply_to=reply_to, force_document=True),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action=f"{action}_force_document",
+            )
+            return
+        raise
+
+
 async def _get_forum_topic_top_message(chat_id: int, title: str) -> int | None:
     if not title:
         return None
@@ -340,7 +378,11 @@ async def _send_to_destination(
     if bucket_cfg:
         topic_title = _bucket_topic_title(bucket_cfg, source_peer_id=source_peer_id, message_id=msg.id)
 
+    s = current_settings()
+
     reply_to = None
+    used_fallback_topic = False
+
     if topic_title:
         try:
             reply_to = await _get_forum_topic_top_message(chat_id, str(topic_title))
@@ -348,12 +390,38 @@ async def _send_to_destination(
             log_event(logger, logging.ERROR, "topic_lookup_failed", chat_id=chat_id, title=str(topic_title), error=str(exc))
             reply_to = None
 
-        s = current_settings()
-        if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
+        if reply_to is None:
+            fallback_title = _fallback_topic_title(chat_id)
+            if fallback_title and str(fallback_title) != str(topic_title):
+                try:
+                    reply_to = await _get_forum_topic_top_message(chat_id, str(fallback_title))
+                    if reply_to is not None:
+                        used_fallback_topic = True
+                        log_event(
+                            logger,
+                            logging.INFO,
+                            "topic_fallback_used",
+                            chat_id=chat_id,
+                            requested=str(topic_title),
+                            fallback=str(fallback_title),
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    log_event(
+                        logger,
+                        logging.ERROR,
+                        "topic_fallback_lookup_failed",
+                        chat_id=chat_id,
+                        requested=str(topic_title),
+                        fallback=str(fallback_title),
+                        error=str(exc),
+                    )
+
+        # If we can't resolve the topic, default behaviour is: either send to General (reply_to=None)
+        # or skip entirely. If a per-chat fallback topic is configured, prefer sending rather than
+        # dropping the message.
+        if reply_to is None and not bool(s.get("fallback_to_general_topic", True)) and _fallback_topic_title(chat_id) is None:
             log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
             return False
-
-    s = current_settings()
 
     media = msg.media
     if isinstance(media, types.MessageMediaWebPage):
@@ -373,24 +441,28 @@ async def _send_to_destination(
 
     await rate_limiter.wait()
     try:
-        await with_retry(
-            lambda: client.send_message(chat_id, message=caption, file=media, reply_to=reply_to),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="send_message",
-        )
+        await _send_media_with_caption(chat_id, media, caption, reply_to, action="send_message")
         return True
     except Exception as exc:  # noqa: BLE001
-        if media is not None and _is_send_videos_forbidden(exc):
-            await with_retry(
-                lambda: client.send_file(chat_id, media, caption=caption, reply_to=reply_to, force_document=True),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="send_file_force_document",
-            )
-            return True
+        fallback_title = _fallback_topic_title(chat_id)
+        if fallback_title and not used_fallback_topic:
+            try:
+                fallback_reply_to = await _get_forum_topic_top_message(chat_id, str(fallback_title))
+                await rate_limiter.wait()
+                await _send_media_with_caption(chat_id, media, caption, fallback_reply_to, action="send_message_fallback")
+                log_event(logger, logging.INFO, "send_fallback_succeeded", chat_id=chat_id, fallback=str(fallback_title))
+                return True
+            except Exception as fallback_exc:  # noqa: BLE001
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "send_fallback_failed",
+                    chat_id=chat_id,
+                    requested=str(topic_title) if topic_title else None,
+                    fallback=str(fallback_title),
+                    error=str(fallback_exc),
+                )
+
         raise
 
 
@@ -436,9 +508,6 @@ async def handler(event):
         log_event(logger, logging.INFO, "message_blocked", reason="promo_directory", message_id=msg.id)
         return
 
-    if message_looks_like_promo_directory(msg):
-        log_event(logger, logging.INFO, "message_blocked", reason="promo_directory", message_id=msg.id)
-       
     if msg.grouped_id:
         async with media_group_lock:
             gid = msg.grouped_id
@@ -500,6 +569,8 @@ async def process_media_group(gid: int):
                 topic_title = _bucket_topic_title(bucket_cfg, source_peer_id=source_peer_id, message_id=msgs[0].id)
 
             reply_to = None
+            used_fallback_topic = False
+
             if topic_title:
                 try:
                     reply_to = await _get_forum_topic_top_message(chat_id, str(topic_title))
@@ -514,7 +585,33 @@ async def process_media_group(gid: int):
                     )
                     reply_to = None
 
-                if reply_to is None and not bool(s.get("fallback_to_general_topic", True)):
+                if reply_to is None:
+                    fallback_title = _fallback_topic_title(chat_id)
+                    if fallback_title and str(fallback_title) != str(topic_title):
+                        try:
+                            reply_to = await _get_forum_topic_top_message(chat_id, str(fallback_title))
+                            if reply_to is not None:
+                                used_fallback_topic = True
+                                log_event(
+                                    logger,
+                                    logging.INFO,
+                                    "topic_fallback_used",
+                                    chat_id=chat_id,
+                                    requested=str(topic_title),
+                                    fallback=str(fallback_title),
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            log_event(
+                                logger,
+                                logging.ERROR,
+                                "topic_fallback_lookup_failed",
+                                chat_id=chat_id,
+                                requested=str(topic_title),
+                                fallback=str(fallback_title),
+                                error=str(exc),
+                            )
+
+                if reply_to is None and not bool(s.get("fallback_to_general_topic", True)) and _fallback_topic_title(chat_id) is None:
                     log_event(logger, logging.WARNING, "topic_unresolved_skipped", chat_id=chat_id, title=str(topic_title))
                     continue
 
@@ -528,28 +625,31 @@ async def process_media_group(gid: int):
 
             await rate_limiter.wait()
             try:
-                await with_retry(
-                    lambda: client.send_message(chat_id, message=caption, file=media, reply_to=reply_to),
-                    retries=3,
-                    base_delay=1,
-                    logger=logger,
-                    action="send_album",
-                )
+                await _send_media_with_caption(chat_id, media, caption, reply_to, action="send_album")
                 log_event(logger, logging.INFO, "album_sent", chat_id=chat_id, group_id=gid)
             except Exception as exc:  # noqa: BLE001
-                if media and _is_send_videos_forbidden(exc):
-                    await with_retry(
-                        lambda: client.send_file(chat_id, media, caption=caption, reply_to=reply_to, force_document=True),
-                        retries=3,
-                        base_delay=1,
-                        logger=logger,
-                        action="send_album_force_document",
-                    )
-                    log_event(logger, logging.INFO, "album_sent_as_documents", chat_id=chat_id, group_id=gid)
-                else:
-                    payload = {"chat_id": chat_id, "group_id": gid, "error": str(exc)}
-                    write_dlq(DLQ_PATH, payload)
-                    log_event(logger, logging.ERROR, "album_send_failed", **payload)
+                fallback_title = _fallback_topic_title(chat_id)
+                if fallback_title and not used_fallback_topic:
+                    try:
+                        fallback_reply_to = await _get_forum_topic_top_message(chat_id, str(fallback_title))
+                        await rate_limiter.wait()
+                        await _send_media_with_caption(chat_id, media, caption, fallback_reply_to, action="send_album_fallback")
+                        log_event(logger, logging.INFO, "send_fallback_succeeded", chat_id=chat_id, fallback=str(fallback_title))
+                        continue
+                    except Exception as fallback_exc:  # noqa: BLE001
+                        log_event(
+                            logger,
+                            logging.ERROR,
+                            "send_fallback_failed",
+                            chat_id=chat_id,
+                            requested=str(topic_title) if topic_title else None,
+                            fallback=str(fallback_title),
+                            error=str(fallback_exc),
+                        )
+
+                payload = {"chat_id": chat_id, "group_id": gid, "error": str(exc)}
+                write_dlq(DLQ_PATH, payload)
+                log_event(logger, logging.ERROR, "album_send_failed", **payload)
     except asyncio.CancelledError:
         return
 

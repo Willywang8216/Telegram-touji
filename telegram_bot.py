@@ -58,6 +58,10 @@ async def rebuild_forwarding_map():
             source_entity = await client.get_entity(src_id)
             target_entity = await client.get_entity(str(target_bot))
 
+            # Security: userbot should only forward to bots (never to groups/channels).
+            if not isinstance(target_entity, types.User) or not bool(getattr(target_entity, "bot", False)):
+                raise ValueError(f"target_bot must be a bot user, got: {type(target_entity).__name__}")
+
             peer_id = await client.get_peer_id(source_entity)
             noforwards = bool(getattr(source_entity, "noforwards", False))
             forwarding_map[peer_id] = {"target_bot": target_entity, "noforwards": noforwards}
@@ -435,7 +439,11 @@ async def main():
                     await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                     return
                 try:
-                    await client.get_entity(bot)
+                    ent = await client.get_entity(bot)
+                    if not isinstance(ent, types.User) or not bool(getattr(ent, "bot", False)):
+                        await event.reply("🤖 错误: target_bot 必须是机器人账号（bot）。")
+                        return
+
                     exists = next((m for m in bot_mappings if str(m["source_chat"]) == str(src)), None)
                     if exists:
                         if exists["target_bot"] == bot:
