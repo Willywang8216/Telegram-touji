@@ -9,6 +9,25 @@ from common_config import ConfigManager, load_relay_settings, load_userbot_setti
 
 class TestCommonConfig(unittest.TestCase):
     def setUp(self):
+        # Tests should not depend on the caller environment (e.g. docker compose env_file).
+        self._saved_env = {}
+        for key in [
+            "API_ID",
+            "API_HASH",
+            "MASTER_ACCOUNT_ID",
+            "RELAY_API_ID",
+            "RELAY_API_HASH",
+            "RELAY_BOT_TOKEN",
+            "RELAY_DEST_CHANNELS",
+            "RELAY_ALLOWED_SENDER_IDS",
+            "ADMIN_API_ID",
+            "ADMIN_API_HASH",
+            "ADMIN_BOT_TOKEN",
+            "ADMIN_BOT_ADMIN_USER_IDS",
+        ]:
+            self._saved_env[key] = os.environ.get(key)
+            os.environ.pop(key, None)
+
         self.tmp = tempfile.TemporaryDirectory()
         self.path = Path(self.tmp.name) / "config.json"
         self.path.write_text(
@@ -32,8 +51,11 @@ class TestCommonConfig(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
-        for key in ["RELAY_DEST_CHANNELS", "API_ID"]:
-            os.environ.pop(key, None)
+        for key, value in self._saved_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
     def test_load_userbot_settings(self):
         m = ConfigManager(str(self.path))

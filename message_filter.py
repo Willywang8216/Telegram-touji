@@ -67,14 +67,26 @@ def contains_blocked_substring(text: str, needles: Iterable[str]) -> bool:
     return False
 
 
+def _normalize_regex_pattern(pat: str) -> str:
+    # Allow regex strings coming from JSON/YAML where backslashes are often double-escaped.
+    # Also fix JSON "\b" which becomes a backspace character after json.load.
+    out = str(pat)
+    out = out.replace("\b", r"\b").replace("\f", r"\f")
+    out = out.replace("\\\\", "\\")
+    return out
+
+
 def matches_any_regex(text: str, patterns: Iterable[str]) -> bool:
     if not text:
         return False
     for pat in patterns or []:
         if not pat:
             continue
-        if re.search(pat, text, flags=re.IGNORECASE | re.DOTALL):
-            return True
+        try:
+            if re.search(_normalize_regex_pattern(pat), text, flags=re.IGNORECASE | re.DOTALL):
+                return True
+        except re.error:
+            continue
     return False
 
 
