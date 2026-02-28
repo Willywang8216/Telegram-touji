@@ -16,6 +16,7 @@
 - 限流 + 重试 + 死信（DLQ）
 - 运行时配置热重载（检测 `config.json` 变更）
 - （安全）RelayBot 私聊白名单：只接受白名单用户的私聊消息（默认 `master_account_id`），防止陌生人私聊 bot 直接投递内容
+- （新增）AdminBot（独立 bot token）：用于在 Telegram 里点选「新加入但未配置的来源」并添加 routes/topics
 
 ---
 
@@ -51,8 +52,15 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - `relay.allowed_sender_ids`：RelayBot 私聊白名单（推荐填你的 `master_account_id`）
   - 环境变数覆盖：`RELAY_ALLOWED_SENDER_IDS=123,456`
 
-环境变数覆盖（新增/补齐）：
-- `RELAY_DEST_CHANNELS`（逗号分隔）：覆盖 `relay.dest_channels`
+AdminBot（新增）：
+- `ADMIN_BOT_TOKEN`：AdminBot token（用于管理 UI）
+- `ADMIN_BOT_ADMIN_USER_IDS`：AdminBot 白名单 user_id（默认 `master_account_id`）
+
+启动 AdminBot（docker compose profile）：
+
+```bash
+docker compose --profile admin up -d --build
+```
 
 ### 🧵 Topics / 路由（可选）
 
@@ -229,6 +237,7 @@ cp .env.example .env
 
 - `telegram_bot.py`：Userbot 主逻辑（监听、命令处理、转发映射）
 - `bot_relay.py`：RelayBot 主逻辑（过滤、重发）
+- `admin_bot.py`：AdminBot 管理 UI（需要单独的 bot token）
 - `common_config.py`：统一配置读取/保存、`.env` 支持、热重载检测
 - `structured_logger.py`：JSON 日志输出
 - `delivery.py`：限流、重试、DLQ
@@ -242,10 +251,6 @@ cp .env.example .env
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile telegram_bot.py bot_relay.py common_config.py structured_logger.py delivery.py command_utils.py
+python -m py_compile telegram_bot.py bot_relay.py admin_bot.py common_config.py structured_logger.py delivery.py command_utils.py
 bash -n scripts/install.sh
 ```
-
----
-
----

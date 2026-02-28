@@ -26,3 +26,21 @@ services:
       - TZ=Asia/Shanghai
     env_file:
       - .env
+
+  # 服务3: 管理机器人（独立 bot token，用于管理 UI / 点选配置）
+  # 默认不启动：使用 profile "admin"，需要时运行：
+  #   docker compose --profile admin up -d --build
+  adminbot:
+    profiles: ["admin"]
+    build: .
+    container_name: toujibot_admin
+    restart: unless-stopped
+    volumes:
+      - ./:/app
+    command: python admin_bot.py
+    environment:
+      - TZ=Asia/Shanghai
+    env_file:
+      - .env
+    stdin_open: true
+    tty: true

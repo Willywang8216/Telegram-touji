@@ -171,3 +171,35 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "allowed_sender_ids": allowed_sender_ids,
         "admin_user_ids": admin_user_ids,
     }
+
+
+def load_admin_bot_settings(manager: ConfigManager) -> dict[str, Any]:
+    cfg = manager.load()
+    admin = cfg.get("admin_bot", {})
+
+    api_id = _env_int("ADMIN_API_ID", _env_int("API_ID", int(admin.get("api_id", cfg.get("api_id", 0)))))
+    api_hash = _env_str("ADMIN_API_HASH", _env_str("API_HASH", admin.get("api_hash", cfg.get("api_hash", ""))))
+
+    bot_token = _env_str("ADMIN_BOT_TOKEN", admin.get("bot_token", ""))
+
+    admin_raw = _env_str("ADMIN_BOT_ADMIN_USER_IDS")
+    if admin_raw:
+        admin_user_ids = [int(x.strip()) for x in admin_raw.split(",") if x.strip()]
+    else:
+        admin_user_ids = [int(x) for x in (admin.get("admin_user_ids") or []) if str(x).strip()]
+
+    if not admin_user_ids:
+        try:
+            admin_user_ids = [int(cfg.get("master_account_id"))]
+        except Exception:  # noqa: BLE001
+            admin_user_ids = []
+
+    if not api_id or not api_hash or not bot_token:
+        raise ValueError("AdminBot 配置缺失: api_id/api_hash/bot_token")
+
+    return {
+        "api_id": api_id,
+        "api_hash": api_hash,
+        "bot_token": bot_token,
+        "admin_user_ids": admin_user_ids,
+    }

@@ -52,6 +52,8 @@ if [[ "$REBUILD_CONFIG" =~ ^[Yy]$ ]]; then
   TARGET_BOT="${TARGET_BOT:-@your_middle_bot}"
   read -r -p "relay.bot_token (默认: 123456:ABCDEF_your_bot_token): " BOT_TOKEN
   BOT_TOKEN="${BOT_TOKEN:-123456:ABCDEF_your_bot_token}"
+  read -r -p "admin_bot.bot_token (管理机器人，默认: 123456:ABCDEF_your_admin_bot_token): " ADMIN_BOT_TOKEN
+  ADMIN_BOT_TOKEN="${ADMIN_BOT_TOKEN:-123456:ABCDEF_your_admin_bot_token}"
   read -r -p "dest_channels (逗号分隔，默认: -1009876543210): " DEST_CHANNELS_RAW
   DEST_CHANNELS_RAW="${DEST_CHANNELS_RAW:--1009876543210}"
 
@@ -79,7 +81,15 @@ PY
     "api_id": ${API_ID},
     "api_hash": "${API_HASH}",
     "bot_token": "${BOT_TOKEN}",
+    "allowed_sender_ids": [${MASTER_ACCOUNT_ID}],
+    "admin_user_ids": [${MASTER_ACCOUNT_ID}],
     "dest_channels": ${DEST_CHANNELS_JSON}
+  },
+  "admin_bot": {
+    "api_id": ${API_ID},
+    "api_hash": "${API_HASH}",
+    "bot_token": "${ADMIN_BOT_TOKEN}",
+    "admin_user_ids": [${MASTER_ACCOUNT_ID}]
   },
   "proxy": null
 }
@@ -93,6 +103,9 @@ RELAY_API_ID=${API_ID}
 RELAY_API_HASH=${API_HASH}
 RELAY_BOT_TOKEN=${BOT_TOKEN}
 RELAY_DEST_CHANNELS=${DEST_CHANNELS_RAW}
+RELAY_ALLOWED_SENDER_IDS=${MASTER_ACCOUNT_ID}
+ADMIN_BOT_TOKEN=${ADMIN_BOT_TOKEN}
+ADMIN_BOT_ADMIN_USER_IDS=${MASTER_ACCOUNT_ID}
 EOF
 
   echo "[OK] 已生成 config.json 与 .env"
