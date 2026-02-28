@@ -109,6 +109,58 @@ docker compose run --rm userbot python scripts/list_topics.py --all-forums
 docker compose run --rm userbot python scripts/list_topics.py --all-forums --json
 ```
 
+（新增）列出当前 userbot 账号可见的所有对话（含 group/supergroup/channel/user），方便找 peer_id：
+
+```bash
+# 文本：peer_id  kind  forum=0/1  title  @username
+docker compose run --rm userbot python scripts/list_dialogs.py
+
+# 仅列 supergroup+channel 且模糊筛选
+docker compose run --rm userbot python scripts/list_dialogs.py --kinds supergroup,channel --search "keyword"
+
+# JSON 输出
+docker compose run --rm userbot python scripts/list_dialogs.py --json
+```
+
+（新增）命令行加入/退出群组/频道（不依赖 Telegram 私聊指令）：
+
+```bash
+docker compose run --rm userbot python scripts/join_leave.py --join  --peer <@username_or_-100..._or_invite_link>
+docker compose run --rm userbot python scripts/join_leave.py --leave --peer <@username_or_-100...>
+```
+
+（新增）命令行编辑 config.json（添加监听 / 添加路由）：
+
+```bash
+# 添加/更新 bot_mappings
+docker compose run --rm userbot python scripts/config_cli.py add-listen --source <src_peer> --target-bot <@middle_bot> --write
+
+# 添加/合并 relay.routes（--dest 用 JSON，支持 topic_title/topic_from_source/bucket_topics 等）
+docker compose run --rm userbot python scripts/config_cli.py add-route \
+  --source-chat <src_peer_id> \
+  --dest '{"chat_id":-100DEST1,"topic_title":"General"}' \
+  --dest '{"chat_id":-100DEST2,"topic_title":"Other"}' \
+  --write
+```
+
+（新增）检测/清理无效（删除/私有/不可访问）的 chats/topics，并可选择自动退出（不会创建 topic）：
+
+```bash
+# 仅报告（dry-run）
+docker compose run --rm userbot python scripts/prune_invalid_config.py \
+  --prune-bot-mappings --prune-topic-mapping --prune-closed-topics
+
+# 应用修改并写回 config.json（可选 --leave 尝试退出被移除的群/频道）
+docker compose run --rm userbot python scripts/prune_invalid_config.py \
+  --prune-bot-mappings --prune-topic-mapping --prune-closed-topics --write
+```
+
+（已有脚本）仅针对 topic 的缺失/关闭状态做检测与 prune（不会创建 topic）：
+
+```bash
+docker compose run --rm userbot python scripts/prune_forum_topics.py --prune-missing --prune-closed --json
+```
+
 ### 🗓️ Topic 日更保底（可选）
 
 `scripts/autofill_topics.py` 会把每个 topic 的“每日帖子数”补到指定数量：
