@@ -162,15 +162,15 @@
 
     "dest_channels": [-1002350290734, -1002349398833],
     "default_destinations": [
-      {"chat_id": -1002350290734, "topic_title": "Default Rout"},
-      {"chat_id": -1002349398833, "topic_title": "大雜燴"}
+      {"chat_id": -1002350290734, "topic_title": "🧭 Default Rout"},
+      {"chat_id": -1002349398833, "topic_title": "🥘 大雜燴"}
     ],
 
     "forum_topic_top_messages": {},
 
     "fallback_topic_titles": {
-      "-1002349398833": "大雜燴",
-      "-1002350290734": "Default Rout"
+      "-1002349398833": "🥘 大雜燴",
+      "-1002350290734": "🧭 Default Rout"
     },
 
     "topic_deletes": {
@@ -186,7 +186,7 @@
       {
         "source_chats": [-1001514501094],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🐻 Asian bear"},
+          {"chat_id": -1002350290734, "topic_title": "🐻 Asian Bear"},
           {"chat_id": -1002349398833, "topic_title": "🐻 大號熊熊"}
         ]
       },
@@ -224,7 +224,7 @@
           -1002310844949
         ],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🌍 Gay Westerner"},
+          {"chat_id": -1002350290734, "topic_title": "🌍 Western Gay"},
           {"chat_id": -1002349398833, "topic_title": "🌍 歐美GAY"}
         ]
       },
@@ -238,14 +238,14 @@
       {
         "source_chats": [-1001653838131, -1001715232027],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🔒 Gay Chastity"},
+          {"chat_id": -1002350290734, "topic_title": "🔒 Chastity"},
           {"chat_id": -1002349398833, "topic_title": "🔒 鎖雞雞"}
         ]
       },
       {
         "source_chats": [-1002834942876],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "✋ Spank Fetish"},
+          {"chat_id": -1002350290734, "topic_title": "✋ Spanking"},
           {"chat_id": -1002349398833, "topic_title": "✋ 不乖打屁屁"}
         ]
       },
@@ -274,8 +274,7 @@
       {
         "chat_id": -1002350290734,
         "topics": [
-          "🇹🇼 中文（繁體）",
-          "Default Rout",
+          "🧭 Default Rout",
           "🍑 Asian Porn 1",
           "🍑 Asian Porn 2",
           "🍑 Asian Porn 3",
@@ -294,7 +293,7 @@
       {
         "chat_id": -1002349398833,
         "topics": [
-          "大雜燴",
+          "🥘 大雜燴",
           "🇺🇸 英文區",
           "🍑 分流好看片片1",
           "🍑 分流好看片片2",
@@ -366,8 +365,7 @@
 
     "topic_icon_emojis": {
       "-1002350290734": {
-        "🇹🇼 中文（繁體）": "🇹🇼",
-        "Default Rout": "🧭",
+        "🧭 Default Rout": "🧭",
         "🍑 Asian Porn 1": "🍑",
         "🍑 Asian Porn 2": "🍑",
         "🍑 Asian Porn 3": "🍑",
@@ -383,7 +381,7 @@
         "👀 Gay Exhibitionism/Voyeur": "👀"
       },
       "-1002349398833": {
-        "大雜燴": "🍑",
+        "🥘 大雜燴": "🥘",
         "🇺🇸 英文區": "🇺🇸",
         "🍑 分流好看片片1": "🍑",
         "🍑 分流好看片片2": "🍑",
