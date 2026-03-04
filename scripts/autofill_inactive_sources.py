@@ -262,33 +262,83 @@ def _pick_post_caption(post_captions, chat_id: int) -> str:
     return ""
 
 
-async def _send_media(client: TelegramClient, dest_chat_id: int, reply_to: int, media, caption: str) -> None:
+def _src_marker(peer_id: int) -> str:
+    return f"{SRC_MARKER_PREFIX}{peer_id}{SRC_MARKER_SUFFIX}"
+
+
+async def _get_relaybot_entity(client: TelegramClient, bot_mappings: list, source_chat_id: int) -> tuple | None:
+    """Get the relaybot entity for a given source chat from bot_mappings."""
+    target_bot = None
+    for m in bot_mappings:
+        try:
+            if int(m.get("source_chat")) == int(source_chat_id):
+                target_bot = m.get("target_bot")
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    
+    if not target_bot:
+        return None
+    
     try:
-        await client.send_message(dest_chat_id, message=str(caption or ""), file=media, reply_to=int(reply_to))
-        return
+        entity = await client.get_entity(str(target_bot))
+        # Verify it's a bot
+        if not isinstance(entity, types.User) or not bool(getattr(entity, "bot", False)):
+            return None
+        return entity
+    except Exception:  # noqa: BLE001
+        return None
+
+
+async def _forward_to_relaybot(
+    client: TelegramClient,
+    relaybot_entity,
+    source_chat_id: int,
+    message_ids: list[int],
+    caption: str,
+) -> bool:
+    """Forward messages to relaybot with source marker. Returns True on success."""
+    try:
+        # Add source marker to caption
+        marked_caption = f"{_src_marker(source_chat_id)}"
+        if caption:
+            marked_caption = f"{marked_caption} {caption}"
+        
+        if len(message_ids) == 1:
+            await client.forward_messages(relaybot_entity, message_ids[0], from_peer=source_chat_id)
+        else:
+            await client.forward_messages(relaybot_entity, message_ids, from_peer=source_chat_id)
+        return True
     except ChatForwardsRestrictedError:
+        # Re-upload if forwarding is restricted
         tmpdir = tempfile.mkdtemp(prefix="inactive_src_")
         try:
             paths: list[str] = []
-            if isinstance(media, list):
-                for item in media:
-                    p = await client.download_media(item, file=tmpdir)
+            msgs = await client.get_messages(int(source_chat_id), ids=message_ids)
+            msgs = [m for m in (list(msgs) if msgs else []) if m]
+            
+            for m in msgs:
+                if getattr(m, "media", None) and not isinstance(m.media, types.MessageMediaWebPage):
+                    p = await client.download_media(m, file=tmpdir)
                     if p:
                         paths.append(p)
-            else:
-                p = await client.download_media(media, file=tmpdir)
-                if p:
-                    paths.append(p)
-
+            
             if not paths:
-                return
-
+                return False
+            
+            marked_caption = f"{_src_marker(source_chat_id)}"
+            if caption:
+                marked_caption = f"{marked_caption} {caption}"
+            
             if len(paths) == 1:
-                await client.send_file(dest_chat_id, paths[0], caption=str(caption or ""), reply_to=int(reply_to))
+                await client.send_file(relaybot_entity, paths[0], caption=marked_caption)
             else:
-                await client.send_file(dest_chat_id, paths, caption=str(caption or ""), reply_to=int(reply_to))
+                await client.send_file(relaybot_entity, paths, caption=marked_caption)
+            return True
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 async def _iter_source_groups(client: TelegramClient, source_chat_id: int, *, limit: int):
@@ -419,9 +469,23 @@ async def run_once(
 
     posted = 0
 
+    # Cache relaybot entities per source
+    relaybot_cache: dict[int, types.User] = {}
+
     for src in sources:
         if posted >= int(max_posts_per_run):
             return
+
+        # Get relaybot for this source
+        if src not in relaybot_cache:
+            relaybot_entity = await _get_relaybot_entity(client, bot_mappings, int(src))
+            if relaybot_entity:
+                relaybot_cache[src] = relaybot_entity
+            else:
+                print(f"WARNING: No relaybot found for source {src}, skipping")
+                continue
+        else:
+            relaybot_entity = relaybot_cache[src]
 
         if not await _is_source_inactive(client, src, inactive_min=int(inactive_min)):
             continue
@@ -442,14 +506,18 @@ async def run_once(
             except Exception:  # noqa: BLE001
                 source_title = str(src)
 
-        # Resolve destination topics once per destination per source.
-        # For bucket topics we resolve per message, but we keep a small cache.
-        topic_cache: dict[tuple[int, str], tuple[int, int]] = {}
+        # Track used messages for this source (for dedup within this run)
+        # We no longer need topic_cache since relaybot handles topic routing
+        used_msg_ids_this_run: set[int] = set()
 
         candidates: list[list] = []
         async for group in _iter_source_groups(client, int(src), limit=int(scan_limit)):
             msgs = sorted(group, key=lambda x: int(x.id))
             msg_ids = [int(x.id) for x in msgs]
+
+            # Skip if any message was already used in this run
+            if any(mid in used_msg_ids_this_run for mid in msg_ids):
+                continue
 
             media_items = []
             for m in msgs:
@@ -485,80 +553,77 @@ async def run_once(
             first_id = int(group_msgs[0].id)
             msg_ids = [int(x.id) for x in group_msgs]
 
-            for dest in destinations:
-                if posted >= int(max_posts_per_run):
-                    return
+            # Skip if any message was already used in this run
+            if any(mid in used_msg_ids_this_run for mid in msg_ids):
+                continue
 
+            # Check if any destination has this message used recently
+            skip_group = False
+            for dest in destinations:
                 topic_title = dest.topic_title
                 if dest.topic_from_source:
                     topic_title = str(source_title or src)
-
                 if dest.bucket_cfg:
                     topic_title = _bucket_topic_title(dest.bucket_cfg, source_peer_id=int(src), message_id=first_id)
-
+                if topic_title and only_topic_title is not None and str(topic_title) != str(only_topic_title):
+                    continue
                 if not topic_title:
                     continue
+                # We don't have dest_topic_id without resolving, so skip the used_recently check
+                # The relaybot will handle dedup via its own mechanisms
+            if skip_group:
+                continue
 
-                if only_topic_title is not None and str(topic_title) != str(only_topic_title):
-                    continue
+            media_items = []
+            for m in group_msgs:
+                media = _media_for_send(m)
+                if media is not None:
+                    media_items.append(media)
+            if not media_items:
+                continue
 
-                key = (int(dest.chat_id), str(topic_title))
-                if key not in topic_cache:
-                    dest_topic_id, dest_top_message = await _resolve_or_create_topic(client, int(dest.chat_id), str(topic_title))
-                    topic_cache[key] = (int(dest_topic_id), int(dest_top_message))
+            # Get caption - use empty since relaybot will add post_captions
+            caption = ""
 
-                dest_topic_id, dest_top_message = topic_cache[key]
-
-                if _used_recently(conn, int(src), msg_ids, int(dest.chat_id), int(dest_topic_id), cutoff_ts=int(cutoff_ts)):
-                    continue
-
-                override_caption = _pick_post_caption(relay_cfg.get("post_captions"), int(dest.chat_id))
-                if override_caption:
-                    caption = override_caption
-                elif bool(relay_cfg.get("strip_text", True)):
-                    caption = ""
-                else:
-                    caption = _raw_message_text(group_msgs[0])
-
-                media_items = []
-                for m in group_msgs:
-                    media = _media_for_send(m)
-                    if media is not None:
-                        media_items.append(media)
-                if not media_items:
-                    continue
-
-                if dry_run:
-                    print(
-                        f"DRY_RUN send: source_chat_id={int(src)} msg_ids={msg_ids} -> dest_chat_id={int(dest.chat_id)} topic={str(topic_title)!r}"
+            if dry_run:
+                print(
+                    f"DRY_RUN forward: source_chat_id={int(src)} msg_ids={msg_ids} -> relaybot"
+                )
+            else:
+                try:
+                    success = await _forward_to_relaybot(
+                        client,
+                        relaybot_entity,
+                        source_chat_id=int(src),
+                        message_ids=msg_ids,
+                        caption=caption,
                     )
-                else:
-                    try:
-                        await _send_media(
-                            client,
-                            dest_chat_id=int(dest.chat_id),
-                            reply_to=int(dest_top_message),
-                            media=media_items if len(media_items) > 1 else media_items[0],
-                            caption=caption,
-                        )
-                    except FloodWaitError as e:
-                        await asyncio.sleep(int(e.seconds) + 1)
-                        await _send_media(
-                            client,
-                            dest_chat_id=int(dest.chat_id),
-                            reply_to=int(dest_top_message),
-                            media=media_items if len(media_items) > 1 else media_items[0],
-                            caption=caption,
-                        )
+                    if not success:
+                        print(f"WARNING: Failed to forward to relaybot: source={int(src)} msg_ids={msg_ids}")
+                        continue
+                except FloodWaitError as e:
+                    await asyncio.sleep(int(e.seconds) + 1)
+                    success = await _forward_to_relaybot(
+                        client,
+                        relaybot_entity,
+                        source_chat_id=int(src),
+                        message_ids=msg_ids,
+                        caption=caption,
+                    )
+                    if not success:
+                        print(f"WARNING: Failed to forward to relaybot after flood wait: source={int(src)} msg_ids={msg_ids}")
+                        continue
 
-                    _mark_used(conn, int(src), msg_ids, int(dest.chat_id), int(dest_topic_id))
+                # Mark messages as used for this run
+                for mid in msg_ids:
+                    used_msg_ids_this_run.add(mid)
 
-                posted += 1
-                to_post -= 1
-                await asyncio.sleep(float(sleep_between_posts))
+            posted += 1
+            to_post -= 1
+            await asyncio.sleep(float(sleep_between_posts))
 
-                if to_post <= 0:
-                    break
+            if to_post <= 0:
+                break
 
 
 async def main():
