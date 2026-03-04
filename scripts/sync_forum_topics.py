@@ -157,28 +157,6 @@ async def apply_topic_deletes(client: TelegramClient, peer, delete_titles: list[
         await client(functions.messages.DeleteTopicHistoryRequest(peer=entity, top_msg_id=int(topic.top_message)))
 
 
-def _is_chat_not_modified(exc: Exception) -> bool:
-    return "chat_not_modified" in str(exc).lower() or "CHAT_NOT_MODIFIED" in str(exc)
-
-
-async def apply_chat_title_renames(client: TelegramClient, chat_title_renames: dict[str, str]) -> None:
-    if not chat_title_renames:
-        return
-
-    for peer, new_title in chat_title_renames.items():
-        if not peer or not new_title:
-            continue
-
-        try:
-            entity = await client.get_entity(int(peer))
-            await client(functions.channels.EditTitleRequest(channel=entity, title=str(new_title)))
-        except Exception as exc:  # noqa: BLE001
-            if _is_chat_not_modified(exc):
-                print(f"Chat {peer} already has title '{new_title}', skipping.")
-                continue
-            raise
-
-
 async def apply_topic_icons(
     client: TelegramClient,
     peer,
