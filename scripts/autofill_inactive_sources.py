@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS used (
 );
 """
 
+SRC_MARKER_PREFIX = "[[SRC:"
+SRC_MARKER_SUFFIX = "]]"
+
 
 BUILTIN_BLOCKLIST_SUBSTRINGS = [
     # drug / med ads
