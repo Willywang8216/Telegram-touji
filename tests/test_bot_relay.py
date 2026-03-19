@@ -1,5 +1,7 @@
 import unittest
 
+from telethon import types, utils
+
 from bot_relay import RelayBot
 
 
@@ -17,11 +19,11 @@ class FakeClient:
     def __init__(self):
         self.calls = []
 
-    async def send_message(self, channel_id, *, message=None):
-        self.calls.append(("send_message", channel_id, message))
+    async def send_message(self, chat_id, *, message=None, reply_to=None):
+        self.calls.append(("send_message", chat_id, message, reply_to))
 
-    async def send_file(self, channel_id, file, *, caption=None):
-        self.calls.append(("send_file", channel_id, file, caption))
+    async def send_file(self, chat_id, file, *, caption=None, reply_to=None):
+        self.calls.append(("send_file", chat_id, file, caption, reply_to))
 
 
 class FakeSender:
@@ -29,12 +31,18 @@ class FakeSender:
         self.is_self = is_self
 
 
+class FakeForwardHeader:
+    def __init__(self, from_id):
+        self.from_id = from_id
+
+
 class FakeMessage:
-    def __init__(self, *, message_id=1, grouped_id=None, media=None, raw_text=""):
+    def __init__(self, *, message_id=1, grouped_id=None, media=None, raw_text="", fwd_from=None):
         self.id = message_id
         self.grouped_id = grouped_id
         self.media = media
         self.raw_text = raw_text
+        self.fwd_from = fwd_from
 
 
 class FakeEvent:
@@ -65,7 +73,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             client.calls,
-            [("send_message", -100, "hello"), ("send_message", -200, "hello")],
+            [("send_message", -100, "hello", None), ("send_message", -200, "hello", None)],
         )
 
     async def test_media_message_relays_as_upload(self):
@@ -81,7 +89,44 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="cap", message=msg)
         await bot.handle(event)
 
-        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap")])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
+
+    async def test_routes_choose_destinations_by_source_chat_id(self):
+        client = FakeClient()
+        source_id = utils.get_peer_id(types.PeerChannel(123))
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-999],
+                "master_account_id": 0,
+                "routes": [
+                    {
+                        "source_chats": [source_id],
+                        "destinations": [{"chat_id": -100, "topic_title": "TopicA"}],
+                    }
+                ],
+                "default_destinations": [{"chat_id": -200}],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(
+            message_id=10,
+            media=None,
+            raw_text="hello",
+            fwd_from=FakeForwardHeader(types.PeerChannel(123)),
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
+
+        # Avoid hitting Telegram API in tests.
+        async def fake_get_or_create_top_message_id(chat_id, title):
+            return 42
+
+        bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
+
+        await bot.handle(event)
+        self.assertEqual(client.calls, [("send_message", -100, "hello", 42)])
 
     async def test_unauthorized_sender_blocked_when_enabled(self):
         client = FakeClient()

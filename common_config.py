@@ -13,7 +13,9 @@ class ConfigManager:
         self._config: dict[str, Any] | None = None
 
     def _load_dotenv(self) -> None:
-        env_file = Path(".env")
+        # Load a .env from the same directory as the config file (keeps tests deterministic
+        # and avoids accidentally reading unrelated .env files).
+        env_file = self.path.parent / ".env"
         if not env_file.exists():
             return
         for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -83,6 +85,26 @@ def load_userbot_settings(manager: ConfigManager) -> dict[str, Any]:
     }
 
 
+def _normalize_chat_id(value: Any) -> int:
+    # Accept already-int or stringified int.
+    return int(value)
+
+
+def _normalize_destinations(value: Any) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if "chat_id" not in item:
+            continue
+        dest = dict(item)
+        dest["chat_id"] = _normalize_chat_id(dest["chat_id"])
+        out.append(dest)
+    return out
+
+
 def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     cfg = manager.load()
     relay = cfg.get("relay", {})
@@ -107,10 +129,50 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     if not api_id or not api_hash or not bot_token or not dest_channels:
         raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/dest_channels")
 
+    post_captions = relay.get("post_captions", {})
+    post_captions_norm: dict[int, str] = {}
+    if isinstance(post_captions, dict):
+        for k, v in post_captions.items():
+            try:
+                post_captions_norm[_normalize_chat_id(k)] = str(v)
+            except Exception:  # noqa: BLE001
+                continue
+
+    fallback_topic_titles = relay.get("fallback_topic_titles", {})
+    fallback_topic_titles_norm: dict[int, str] = {}
+    if isinstance(fallback_topic_titles, dict):
+        for k, v in fallback_topic_titles.items():
+            try:
+                fallback_topic_titles_norm[_normalize_chat_id(k)] = str(v)
+            except Exception:  # noqa: BLE001
+                continue
+
+    routes_raw = relay.get("routes", [])
+    routes: list[dict[str, Any]] = []
+    if isinstance(routes_raw, list):
+        for r in routes_raw:
+            if not isinstance(r, dict):
+                continue
+            source_chats = [_normalize_chat_id(x) for x in r.get("source_chats", [])]
+            destinations = _normalize_destinations(r.get("destinations", []))
+            if not source_chats or not destinations:
+                continue
+            routes.append({"source_chats": source_chats, "destinations": destinations})
+
+    default_destinations = _normalize_destinations(relay.get("default_destinations", []))
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
         "bot_token": bot_token,
         "dest_channels": dest_channels,
         "master_account_id": int(master_account_id or 0),
+        # Optional relay behavior controls (used by bot_relay.py)
+        "strip_text": bool(relay.get("strip_text", False)),
+        "post_captions": post_captions_norm,
+        "blocklist_substrings": list(relay.get("blocklist_substrings", []) or []),
+        "routes": routes,
+        "default_destinations": default_destinations,
+        "fallback_topic_titles": fallback_topic_titles_norm,
+        "fallback_to_general_topic": bool(relay.get("fallback_to_general_topic", False)),
     }
