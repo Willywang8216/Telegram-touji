@@ -86,9 +86,18 @@ def load_userbot_settings(manager: ConfigManager) -> dict[str, Any]:
 def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     cfg = manager.load()
     relay = cfg.get("relay", {})
+
     api_id = _env_int("RELAY_API_ID", _env_int("API_ID", int(relay.get("api_id", cfg.get("api_id", 0)))))
     api_hash = _env_str("RELAY_API_HASH", _env_str("API_HASH", relay.get("api_hash", cfg.get("api_hash", ""))))
     bot_token = _env_str("RELAY_BOT_TOKEN", relay.get("bot_token", ""))
+
+    # Optional: restrict which user is allowed to DM the relay bot to trigger relays.
+    # If unset/0 -> allow any sender (less safe, but backwards-compatible).
+    master_account_id = _env_int(
+        "RELAY_MASTER_ACCOUNT_ID",
+        int(relay.get("master_account_id", 0) or 0),
+    )
+
     dest_raw = _env_str("RELAY_DEST_CHANNELS")
     if dest_raw:
         dest_channels = [int(x.strip()) for x in dest_raw.split(",") if x.strip()]
@@ -103,4 +112,5 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "api_hash": api_hash,
         "bot_token": bot_token,
         "dest_channels": dest_channels,
+        "master_account_id": int(master_account_id or 0),
     }

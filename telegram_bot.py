@@ -13,7 +13,8 @@ logger = get_logger("userbot")
 config_manager = ConfigManager()
 settings = load_userbot_settings(config_manager)
 
-media_group_cache = {}
+# Keyed by (chat_id, grouped_id) to avoid collisions across different source chats.
+media_group_cache: dict[tuple[int, int], dict] = {}
 media_group_lock = asyncio.Lock()
 
 client = TelegramClient("anon", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
@@ -46,7 +47,20 @@ async def rebuild_forwarding_map():
                 src_id = source_chat
             source_entity = await client.get_entity(src_id)
             target_entity = await client.get_entity(str(target_bot))
-            peer_id = await client.get_peer_id(source_entity)
+
+            # Safety: prevent misconfiguration where target_bot is actually a channel/group.
+            # If this happens, the *user account* will forward directly into that channel/group.
+            if not getattr(target_entity, "bot", False):
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "mapping_failed_target_not_bot",
+                    source_chat=str(source_chat),
+                    target_bot=str(target_bot),
+                )
+                continue
+
+            peer_id = client.get_peer_id(source_entity)
             forwarding_map[peer_id] = target_entity
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
@@ -82,22 +96,23 @@ async def handler(event):
         target_bot = forwarding_map[event.chat_id]
         if event.message.grouped_id:
             async with media_group_lock:
-                gid = event.message.grouped_id
-                if gid not in media_group_cache:
-                    media_group_cache[gid] = {"messages": [], "task": None, "target_bot": target_bot}
-                media_group_cache[gid]["messages"].append(event.message.id)
-                if media_group_cache[gid]["task"]:
-                    media_group_cache[gid]["task"].cancel()
-                media_group_cache[gid]["task"] = asyncio.create_task(process_media_group(gid, event.chat_id))
+                key = (event.chat_id, event.message.grouped_id)
+                if key not in media_group_cache:
+                    media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot}
+                media_group_cache[key]["messages"].append(event.message.id)
+                if media_group_cache[key]["task"]:
+                    media_group_cache[key]["task"].cancel()
+                media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
         else:
             await safe_forward_single(target_bot, event.message.id, event.chat_id)
 
 
-async def process_media_group(grouped_id, from_peer):
+async def process_media_group(key: tuple[int, int]):
+    from_peer, grouped_id = key
     await asyncio.sleep(1.5)
     async with media_group_lock:
-        if grouped_id in media_group_cache:
-            data = media_group_cache[grouped_id]
+        if key in media_group_cache:
+            data = media_group_cache[key]
             try:
                 await rate_limiter.wait()
                 await with_retry(
@@ -113,7 +128,7 @@ async def process_media_group(grouped_id, from_peer):
                 write_dlq(DLQ_PATH, payload)
                 log_event(logger, logging.ERROR, "group_forward_failed", **payload)
             finally:
-                del media_group_cache[grouped_id]
+                del media_group_cache[key]
 
 
 async def join_chat(entity):
@@ -159,7 +174,10 @@ async def main():
                     await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                     return
                 try:
-                    await client.get_entity(bot)
+                    ent = await client.get_entity(bot)
+                    if not getattr(ent, "bot", False):
+                        await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
+                        return
                     exists = next((m for m in bot_mappings if str(m["source_chat"]) == str(src)), None)
                     if exists:
                         if exists["target_bot"] == bot:

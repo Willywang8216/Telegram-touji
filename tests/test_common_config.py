@@ -32,7 +32,7 @@ class TestCommonConfig(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
-        for key in ["RELAY_DEST_CHANNELS", "API_ID"]:
+        for key in ["RELAY_DEST_CHANNELS", "API_ID", "RELAY_MASTER_ACCOUNT_ID"]:
             os.environ.pop(key, None)
 
     def test_load_userbot_settings(self):
@@ -46,6 +46,18 @@ class TestCommonConfig(unittest.TestCase):
         m = ConfigManager(str(self.path))
         s = load_relay_settings(m)
         self.assertEqual(s["dest_channels"], [-200, -300])
+
+    def test_relay_master_account_default(self):
+        m = ConfigManager(str(self.path))
+        s = load_relay_settings(m)
+        # Backwards-compatible default: disabled unless explicitly set.
+        self.assertEqual(s["master_account_id"], 0)
+
+    def test_relay_master_account_env_override(self):
+        os.environ["RELAY_MASTER_ACCOUNT_ID"] = "123"
+        m = ConfigManager(str(self.path))
+        s = load_relay_settings(m)
+        self.assertEqual(s["master_account_id"], 123)
 
     def test_save(self):
         m = ConfigManager(str(self.path))
