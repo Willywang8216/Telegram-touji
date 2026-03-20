@@ -20,7 +20,8 @@ logger = get_logger("userbot")
 config_manager = ConfigManager()
 settings = load_userbot_settings(config_manager)
 
-media_group_cache = {}
+# Keyed by (chat_id, grouped_id) to avoid collisions across different source chats.
+media_group_cache: dict[tuple[int, int], dict] = {}
 media_group_lock = asyncio.Lock()
 
 client = TelegramClient("anon", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
@@ -58,22 +59,21 @@ async def rebuild_forwarding_map():
             source_entity = await client.get_entity(src_id)
             target_entity = await client.get_entity(str(target_bot))
 
-            # Security: userbot should only forward to bots (never to groups/channels).
-            if not isinstance(target_entity, types.User) or not bool(getattr(target_entity, "bot", False)):
-                raise ValueError(f"target_bot must be a bot user, got: {type(target_entity).__name__}")
+            # Safety: prevent misconfiguration where target_bot is actually a channel/group.
+            # If this happens, the *user account* will forward directly into that channel/group.
+            if not getattr(target_entity, "bot", False):
+                log_event(
+                    logger,
+                    logging.ERROR,
+                    "mapping_failed_target_not_bot",
+                    source_chat=str(source_chat),
+                    target_bot=str(target_bot),
+                )
+                continue
 
-            peer_id = await client.get_peer_id(source_entity)
-            noforwards = bool(getattr(source_entity, "noforwards", False))
-            forwarding_map[peer_id] = {"target_bot": target_entity, "noforwards": noforwards}
-
-            log_event(
-                logger,
-                logging.INFO,
-                "mapping_updated",
-                source_chat=str(source_chat),
-                target_bot=str(target_bot),
-                noforwards=noforwards,
-            )
+            peer_id = client.get_peer_id(source_entity)
+            forwarding_map[peer_id] = target_entity
+            log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
 
@@ -241,114 +241,23 @@ async def handler(event):
 
         if msg.grouped_id:
             async with media_group_lock:
-                gid = event.message.grouped_id
-                if gid not in media_group_cache:
-                    media_group_cache[gid] = {"messages": [], "task": None, "target_bot": target_bot, "noforwards": noforwards}
-                media_group_cache[gid]["messages"].append(event.message.id)
-                if media_group_cache[gid]["task"]:
-                    media_group_cache[gid]["task"].cancel()
-                media_group_cache[gid]["task"] = asyncio.create_task(process_media_group(gid, event.chat_id))
-            return
-
-        if media is None:
-            return
-
-        if message_looks_like_promo_directory(msg):
-            return
-
-        await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards)
+                key = (event.chat_id, event.message.grouped_id)
+                if key not in media_group_cache:
+                    media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot}
+                media_group_cache[key]["messages"].append(event.message.id)
+                if media_group_cache[key]["task"]:
+                    media_group_cache[key]["task"].cancel()
+                media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
+        else:
+            await safe_forward_single(target_bot, event.message.id, event.chat_id)
 
 
-async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int, force_reupload: bool = False):
-    msgs = await client.get_messages(chat_id, ids=message_ids)
-    msgs = [m for m in (list(msgs) if msgs else []) if m]
-    msgs.sort(key=lambda m: m.id)
-
-    files = [m.media for m in msgs if m.media is not None and not isinstance(m.media, types.MessageMediaWebPage)]
-    original_caption = next((m.message for m in msgs if getattr(m, "message", None)), "")
-    caption = _src_marker(chat_id)
-    if original_caption:
-        caption = f"{caption} {original_caption}"
-
-    await rate_limiter.wait()
-
-    if force_reupload and files:
-        await _reupload_group_to_bot(target_bot, msgs, caption)
-        return
-
-    if files:
-        try:
-            await client.send_file(target_bot, files, caption=caption)
-        except Exception as exc:  # noqa: BLE001
-            if _is_protected_forward_error(exc):
-                await _reupload_group_to_bot(target_bot, msgs, caption)
-            else:
-                raise
-    else:
-        await with_retry(
-            lambda: client.send_message(target_bot, caption),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="copy_group_send_message",
-        )
-
-
-async def process_media_group(grouped_id, from_peer):
+async def process_media_group(key: tuple[int, int]):
+    from_peer, grouped_id = key
     await asyncio.sleep(1.5)
     async with media_group_lock:
-        if grouped_id not in media_group_cache:
-            return
-
-        data = media_group_cache[grouped_id]
-        target_bot = data["target_bot"]
-        noforwards = bool(data.get("noforwards"))
-        message_ids = [int(x) for x in data["messages"]]
-
-        try:
-            msgs = await client.get_messages(int(from_peer), ids=message_ids)
-            msgs = [m for m in (list(msgs) if msgs else []) if m]
-            msgs.sort(key=lambda m: m.id)
-
-            if not msgs:
-                return
-
-            if group_looks_like_promo_directory(msgs):
-                return
-
-            files = []
-            for m in msgs:
-                media = getattr(m, "media", None)
-                if isinstance(media, types.MessageMediaWebPage):
-                    continue
-                if media is not None:
-                    files.append(media)
-
-            if not files:
-                return
-
-            if noforwards:
-                try:
-                    await _copy_group_to_bot(target_bot, message_ids, int(from_peer), force_reupload=True)
-                    log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(message_ids), method="reupload")
-                except Exception as copy_exc:  # noqa: BLE001
-                    if _is_protected_forward_error(copy_exc):
-                        log_event(
-                            logger,
-                            logging.WARNING,
-                            "group_skipped_protected",
-                            group_id=grouped_id,
-                            count=len(message_ids),
-                            error=str(copy_exc),
-                        )
-                        return
-
-                    payload = {"group_id": grouped_id, "messages": message_ids, "error": str(copy_exc)}
-                    write_dlq(DLQ_PATH, payload)
-                    log_event(logger, logging.ERROR, "group_copy_failed", **payload)
-                return
-
-            await rate_limiter.wait()
+        if key in media_group_cache:
+            data = media_group_cache[key]
             try:
                 await client.forward_messages(target_bot, message_ids, from_peer=from_peer)
                 log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(message_ids))
@@ -392,8 +301,8 @@ async def process_media_group(grouped_id, from_peer):
                 payload = {"group_id": grouped_id, "messages": message_ids, "error": str(exc)}
                 write_dlq(DLQ_PATH, payload)
                 log_event(logger, logging.ERROR, "group_forward_failed", **payload)
-        finally:
-            del media_group_cache[grouped_id]
+            finally:
+                del media_group_cache[key]
 
 
 async def join_chat(entity):
@@ -440,10 +349,9 @@ async def main():
                     return
                 try:
                     ent = await client.get_entity(bot)
-                    if not isinstance(ent, types.User) or not bool(getattr(ent, "bot", False)):
-                        await event.reply("🤖 错误: target_bot 必须是机器人账号（bot）。")
+                    if not getattr(ent, "bot", False):
+                        await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
                         return
-
                     exists = next((m for m in bot_mappings if str(m["source_chat"]) == str(src)), None)
                     if exists:
                         if exists["target_bot"] == bot:

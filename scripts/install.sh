@@ -46,6 +46,8 @@ if [[ "$REBUILD_CONFIG" =~ ^[Yy]$ ]]; then
   API_HASH="${API_HASH:-your_api_hash}"
   read -r -p "master_account_id (默认: 123456789): " MASTER_ACCOUNT_ID
   MASTER_ACCOUNT_ID="${MASTER_ACCOUNT_ID:-123456789}"
+  read -r -p "relay_master_account_id (可选: 仅允许此用户私聊bot触发转发，默认: 0=不限制): " RELAY_MASTER_ACCOUNT_ID
+  RELAY_MASTER_ACCOUNT_ID="${RELAY_MASTER_ACCOUNT_ID:-0}"
   read -r -p "source_chat (默认: -1001234567890): " SOURCE_CHAT
   SOURCE_CHAT="${SOURCE_CHAT:--1001234567890}"
   read -r -p "target_bot (默认: @your_middle_bot): " TARGET_BOT
@@ -81,9 +83,8 @@ PY
     "api_id": ${API_ID},
     "api_hash": "${API_HASH}",
     "bot_token": "${BOT_TOKEN}",
-    "allowed_sender_ids": [${MASTER_ACCOUNT_ID}],
-    "admin_user_ids": [${MASTER_ACCOUNT_ID}],
-    "dest_channels": ${DEST_CHANNELS_JSON}
+    "dest_channels": ${DEST_CHANNELS_JSON},
+    "master_account_id": ${RELAY_MASTER_ACCOUNT_ID}
   },
   "admin_bot": {
     "api_id": ${API_ID},
@@ -103,9 +104,7 @@ RELAY_API_ID=${API_ID}
 RELAY_API_HASH=${API_HASH}
 RELAY_BOT_TOKEN=${BOT_TOKEN}
 RELAY_DEST_CHANNELS=${DEST_CHANNELS_RAW}
-RELAY_ALLOWED_SENDER_IDS=${MASTER_ACCOUNT_ID}
-ADMIN_BOT_TOKEN=${ADMIN_BOT_TOKEN}
-ADMIN_BOT_ADMIN_USER_IDS=${MASTER_ACCOUNT_ID}
+RELAY_MASTER_ACCOUNT_ID=${RELAY_MASTER_ACCOUNT_ID}
 EOF
 
   echo "[OK] 已生成 config.json 与 .env"

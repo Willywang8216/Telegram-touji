@@ -12,73 +12,8 @@
     "api_id": 12345678,
     "api_hash": "your_api_hash",
     "bot_token": "123456:ABCDEF_your_bot_token",
-
-    "strip_text": true,
-
-    "allowed_sender_ids": [123456789],
-    "admin_user_ids": [123456789],
-
-    "post_captions": {
-      "-1009876543210": "Your default caption here"
-    },
-
-    "media_filter_use_general_blocklist": true,
-    "media_blocklist_substrings": [],
-    "media_blocklist_regexes": [],
-    "media_block_contact_ads": false,
-
-    "autofill_blocklist_substrings": [],
-    "autofill_blocklist_regexes": [],
-    "autofill_block_contact_ads": false,
-
     "dest_channels": [-1009876543210],
-    "default_destinations": [
-      {"chat_id": -1009876543210, "bucket_topics": {"prefix": "Bucket ", "count": 5, "by": "source"}}
-    ],
-
-    "forum_topic_top_messages": {
-      "-1009876543210": {
-        "General": 123
-      }
-    },
-
-    "routes": [
-      {
-        "source_chat": -1001234567890,
-        "destinations": [
-          {"chat_id": -1009876543210, "topic_title": "General"}
-        ]
-      }
-    ],
-
-    "ensure_forum_topics": [
-      {"chat_id": -1009876543210, "topics": ["🇺🇸 English", "🇹🇼 中文（繁體）"]}
-    ],
-
-    "topic_renames": {
-      "-1009876543210": {
-        "Mandarin Chinese speaker": "🇹🇼 中文（繁體）",
-        "English speaker": "🇺🇸 English"
-      }
-    },
-
-    "topic_icon_emojis": {
-      "-1009876543210": {
-        "🇺🇸 English": "🇺🇸",
-        "🇹🇼 中文（繁體）": "🇹🇼"
-      }
-    },
-
-    "blocklist_substrings": [
-      "全球最快VPN",
-      "网黄尊享"
-    ],
-
-    "blocklist_regexes": [
-      "\\b(?:usdt|btc|eth)\\b"
-    ],
-    "block_contact_ads": true,
-    "fallback_to_general_topic": false
+    "master_account_id": 0
   },
   "proxy": null
 }

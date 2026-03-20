@@ -13,7 +13,9 @@ class ConfigManager:
         self._config: dict[str, Any] | None = None
 
     def _load_dotenv(self) -> None:
-        env_file = Path(".env")
+        # Load a .env from the same directory as the config file (keeps tests deterministic
+        # and avoids accidentally reading unrelated .env files).
+        env_file = self.path.parent / ".env"
         if not env_file.exists():
             return
         for line in env_file.read_text(encoding="utf-8").splitlines():
@@ -83,6 +85,26 @@ def load_userbot_settings(manager: ConfigManager) -> dict[str, Any]:
     }
 
 
+def _normalize_chat_id(value: Any) -> int:
+    # Accept already-int or stringified int.
+    return int(value)
+
+
+def _normalize_destinations(value: Any) -> list[dict[str, Any]]:
+    if not value:
+        return []
+    out: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        if "chat_id" not in item:
+            continue
+        dest = dict(item)
+        dest["chat_id"] = _normalize_chat_id(dest["chat_id"])
+        out.append(dest)
+    return out
+
+
 def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     cfg = manager.load()
     relay = cfg.get("relay", {})
@@ -90,6 +112,13 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     api_id = _env_int("RELAY_API_ID", _env_int("API_ID", int(relay.get("api_id", cfg.get("api_id", 0)))))
     api_hash = _env_str("RELAY_API_HASH", _env_str("API_HASH", relay.get("api_hash", cfg.get("api_hash", ""))))
     bot_token = _env_str("RELAY_BOT_TOKEN", relay.get("bot_token", ""))
+
+    # Optional: restrict which user is allowed to DM the relay bot to trigger relays.
+    # If unset/0 -> allow any sender (less safe, but backwards-compatible).
+    master_account_id = _env_int(
+        "RELAY_MASTER_ACCOUNT_ID",
+        int(relay.get("master_account_id", 0) or 0),
+    )
 
     dest_raw = _env_str("RELAY_DEST_CHANNELS")
     if dest_raw:
@@ -153,60 +182,50 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     if not api_id or not api_hash or not bot_token or (not default_destinations and not routes):
         raise ValueError("Relay 配置缺失: api_id/api_hash/bot_token/(default_destinations|routes)")
 
+    post_captions = relay.get("post_captions", {})
+    post_captions_norm: dict[int, str] = {}
+    if isinstance(post_captions, dict):
+        for k, v in post_captions.items():
+            try:
+                post_captions_norm[_normalize_chat_id(k)] = str(v)
+            except Exception:  # noqa: BLE001
+                continue
+
+    fallback_topic_titles = relay.get("fallback_topic_titles", {})
+    fallback_topic_titles_norm: dict[int, str] = {}
+    if isinstance(fallback_topic_titles, dict):
+        for k, v in fallback_topic_titles.items():
+            try:
+                fallback_topic_titles_norm[_normalize_chat_id(k)] = str(v)
+            except Exception:  # noqa: BLE001
+                continue
+
+    routes_raw = relay.get("routes", [])
+    routes: list[dict[str, Any]] = []
+    if isinstance(routes_raw, list):
+        for r in routes_raw:
+            if not isinstance(r, dict):
+                continue
+            source_chats = [_normalize_chat_id(x) for x in r.get("source_chats", [])]
+            destinations = _normalize_destinations(r.get("destinations", []))
+            if not source_chats or not destinations:
+                continue
+            routes.append({"source_chats": source_chats, "destinations": destinations})
+
+    default_destinations = _normalize_destinations(relay.get("default_destinations", []))
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
         "bot_token": bot_token,
         "dest_channels": dest_channels,
-        "default_destinations": default_destinations,
+        "master_account_id": int(master_account_id or 0),
+        # Optional relay behavior controls (used by bot_relay.py)
+        "strip_text": bool(relay.get("strip_text", False)),
+        "post_captions": post_captions_norm,
+        "blocklist_substrings": list(relay.get("blocklist_substrings", []) or []),
         "routes": routes,
-        "strip_text": strip_text,
-        "blocklist_substrings": blocklist_substrings,
-        "blocklist_regexes": blocklist_regexes,
-        "block_contact_ads": block_contact_ads,
-        "contact_ad_keywords": contact_ad_keywords,
-        "fallback_to_general_topic": fallback_to_general_topic,
-        "post_captions": post_captions,
-        "media_filter_use_general_blocklist": media_filter_use_general_blocklist,
-        "media_blocklist_substrings": media_blocklist_substrings,
-        "media_blocklist_regexes": media_blocklist_regexes,
-        "media_block_contact_ads": bool(media_block_contact_ads),
-        "media_contact_ad_keywords": media_contact_ad_keywords,
-        "ensure_forum_topics": ensure_forum_topics,
-        "forum_topic_top_messages": forum_topic_top_messages,
-        "fallback_topic_titles": fallback_topic_titles,
-        "allowed_sender_ids": allowed_sender_ids,
-        "admin_user_ids": admin_user_ids,
-    }
-
-
-def load_admin_bot_settings(manager: ConfigManager) -> dict[str, Any]:
-    cfg = manager.load()
-    admin = cfg.get("admin_bot", {})
-
-    api_id = _env_int("ADMIN_API_ID", _env_int("API_ID", int(admin.get("api_id", cfg.get("api_id", 0)))))
-    api_hash = _env_str("ADMIN_API_HASH", _env_str("API_HASH", admin.get("api_hash", cfg.get("api_hash", ""))))
-
-    bot_token = _env_str("ADMIN_BOT_TOKEN", admin.get("bot_token", ""))
-
-    admin_raw = _env_str("ADMIN_BOT_ADMIN_USER_IDS")
-    if admin_raw:
-        admin_user_ids = [int(x.strip()) for x in admin_raw.split(",") if x.strip()]
-    else:
-        admin_user_ids = [int(x) for x in (admin.get("admin_user_ids") or []) if str(x).strip()]
-
-    if not admin_user_ids:
-        try:
-            admin_user_ids = [int(cfg.get("master_account_id"))]
-        except Exception:  # noqa: BLE001
-            admin_user_ids = []
-
-    if not api_id or not api_hash or not bot_token:
-        raise ValueError("AdminBot 配置缺失: api_id/api_hash/bot_token")
-
-    return {
-        "api_id": api_id,
-        "api_hash": api_hash,
-        "bot_token": bot_token,
-        "admin_user_ids": admin_user_ids,
+        "default_destinations": default_destinations,
+        "fallback_topic_titles": fallback_topic_titles_norm,
+        "fallback_to_general_topic": bool(relay.get("fallback_to_general_topic", False)),
     }
