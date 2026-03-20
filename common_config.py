@@ -214,6 +214,18 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
 
     default_destinations = _normalize_destinations(relay.get("default_destinations", []))
 
+    general_topic_buckets = relay.get("general_topic_buckets", {})
+    general_topic_buckets_norm: dict[int, list[str]] = {}
+    if isinstance(general_topic_buckets, dict):
+        for k, v in general_topic_buckets.items():
+            try:
+                chat_id = _normalize_chat_id(k)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(v, list):
+                continue
+            general_topic_buckets_norm[chat_id] = [str(x) for x in v if str(x).strip()]
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
@@ -228,4 +240,7 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "default_destinations": default_destinations,
         "fallback_topic_titles": fallback_topic_titles_norm,
         "fallback_to_general_topic": bool(relay.get("fallback_to_general_topic", False)),
+        # If enabled: unrouted sources get distributed into topic buckets per destination chat.
+        "distribute_unrouted_to_buckets": bool(relay.get("distribute_unrouted_to_buckets", False)),
+        "general_topic_buckets": general_topic_buckets_norm,
     }

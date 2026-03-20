@@ -140,6 +140,18 @@ class RelayBot:
             if source_chat_id in (r.get("source_chats") or []):
                 return list(r.get("destinations") or [])
 
+        if settings.get("distribute_unrouted_to_buckets") and settings.get("general_topic_buckets"):
+            buckets: dict[int, list[str]] = settings.get("general_topic_buckets", {}) or {}
+            seed = abs(source_chat_id) if source_chat_id else 0
+            out: list[dict[str, Any]] = []
+            for cid in settings.get("dest_channels", []) or []:
+                topics = buckets.get(int(cid)) or []
+                if topics:
+                    out.append({"chat_id": int(cid), "topic_title": topics[seed % len(topics)]})
+                else:
+                    out.append({"chat_id": int(cid)})
+            return out
+
         if settings.get("default_destinations"):
             return list(settings.get("default_destinations") or [])
 
