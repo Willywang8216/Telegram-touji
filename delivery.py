@@ -4,7 +4,12 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from structured_logger import log_event
+try:
+    from structured_logger import log_event
+except ModuleNotFoundError:  # pragma: no cover
+    # Fallback for deployments where structured_logger.py wasn't copied/mounted.
+    def log_event(logger, level: int, message: str, **kwargs):
+        logger.log(level, message)
 
 
 class AsyncRateLimiter:

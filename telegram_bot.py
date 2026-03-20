@@ -7,7 +7,23 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
-from structured_logger import get_logger, log_event
+try:
+    from structured_logger import get_logger, log_event
+except ModuleNotFoundError:  # pragma: no cover
+    import logging
+
+    def get_logger(name: str) -> logging.Logger:
+        logger = logging.getLogger(name)
+        if logger.handlers:
+            return logger
+        logger.setLevel(logging.INFO)
+        handler = logging.StreamHandler()
+        logger.addHandler(handler)
+        logger.propagate = False
+        return logger
+
+    def log_event(logger: logging.Logger, level: int, message: str, **kwargs):
+        logger.log(level, message)
 
 logger = get_logger("userbot")
 config_manager = ConfigManager()
