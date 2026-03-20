@@ -110,25 +110,28 @@ async def handler(event):
 async def process_media_group(key: tuple[int, int]):
     from_peer, grouped_id = key
     await asyncio.sleep(1.5)
+
     async with media_group_lock:
-        if key in media_group_cache:
-            data = media_group_cache[key]
-            try:
-                await rate_limiter.wait()
-                await with_retry(
-                    lambda: client.forward_messages(data["target_bot"], data["messages"], from_peer=from_peer),
-                    retries=3,
-                    base_delay=1,
-                    logger=logger,
-                    action="forward_group",
-                )
-                log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(data["messages"]))
-            except Exception as exc:  # noqa: BLE001
-                payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
-                write_dlq(DLQ_PATH, payload)
-                log_event(logger, logging.ERROR, "group_forward_failed", **payload)
-            finally:
-                del media_group_cache[key]
+        data = media_group_cache.get(key)
+        if not data:
+            return
+        # Remove first so we never double-send even if forwarding throws.
+        del media_group_cache[key]
+
+    try:
+        await rate_limiter.wait()
+        await with_retry(
+            lambda: client.forward_messages(data["target_bot"], data["messages"], from_peer=from_peer),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="forward_group",
+        )
+        log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(data["messages"]))
+    except Exception as exc:  # noqa: BLE001
+        payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
+        write_dlq(DLQ_PATH, payload)
+        log_event(logger, logging.ERROR, "group_forward_failed", **payload)
 
 
 async def join_chat(entity):
