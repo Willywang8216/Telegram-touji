@@ -189,5 +189,8 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "fallback_to_general_topic": bool(relay.get("fallback_to_general_topic", False)),
         # If enabled: unrouted sources get distributed into topic buckets per destination chat.
         "distribute_unrouted_to_buckets": bool(relay.get("distribute_unrouted_to_buckets", False)),
+        # "source" (default): stable bucket per source_chat_id
+        # "message": bucket varies per forwarded message/album (more even distribution)
+        "unrouted_distribution_mode": str(relay.get("unrouted_distribution_mode", "source") or "source"),
         "general_topic_buckets": general_topic_buckets_norm,
     }

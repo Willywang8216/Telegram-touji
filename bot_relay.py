@@ -68,8 +68,7 @@ class ForumTopicResolver:
 
         top = await self._find_topic_top_message_id(chat_id, title)
         if top is None:
-            await self._create_topic(chat_id, title)
-            top = await self._find_topic_top_message_id(chat_id, title)
+            top = await self._create_topic(chat_id, title)
 
         if top is not None:
             chat_cache[title] = top
@@ -77,9 +76,10 @@ class ForumTopicResolver:
 
     async def _find_topic_top_message_id(self, chat_id: int, title: str) -> int | None:
         try:
+            peer = await self.client.get_input_entity(chat_id)
             res = await self.client(
                 functions.messages.GetForumTopicsRequest(
-                    peer=chat_id,
+                    peer=peer,
                     q=title,
                     offset_date=0,
                     offset_id=0,
@@ -91,20 +91,46 @@ class ForumTopicResolver:
                 if getattr(t, "title", None) == title:
                     return int(getattr(t, "top_message", 0) or 0) or None
         except Exception as exc:  # noqa: BLE001
-            log_event(self.logger, logging.INFO, "forum_topics_list_failed", chat_id=chat_id, error=str(exc))
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topics_list_failed",
+                chat_id=chat_id,
+                title=title,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         return None
 
-    async def _create_topic(self, chat_id: int, title: str) -> None:
+    async def _create_topic(self, chat_id: int, title: str) -> int | None:
         try:
-            await self.client(
+            peer = await self.client.get_input_entity(chat_id)
+            res = await self.client(
                 functions.messages.CreateForumTopicRequest(
-                    peer=chat_id,
+                    peer=peer,
                     title=title,
                 )
             )
+
+            # Try to extract the newly created topic's top message ID from the updates.
+            for upd in (getattr(res, "updates", None) or []):
+                msg = getattr(upd, "message", None)
+                if msg is not None and getattr(msg, "id", None):
+                    top = int(getattr(msg, "id"))
+                    log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title, top_message=top)
+                    return top
+
             log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title)
+            return None
         except Exception as exc:  # noqa: BLE001
-            log_event(self.logger, logging.INFO, "forum_topic_create_failed", chat_id=chat_id, title=title, error=str(exc))
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topic_create_failed",
+                chat_id=chat_id,
+                title=title,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
 
 
 class RelayBot:
@@ -143,7 +169,7 @@ class RelayBot:
             )
         return self.settings
 
-    def resolve_destinations(self, source_chat_id: int | None) -> list[dict[str, Any]]:
+    def resolve_destinations(self, source_chat_id: int | None, *, seed: int | None = None) -> list[dict[str, Any]]:
         settings = self.current_settings()
         source_chat_id = int(source_chat_id or 0)
 
@@ -153,12 +179,18 @@ class RelayBot:
 
         if settings.get("distribute_unrouted_to_buckets") and settings.get("general_topic_buckets"):
             buckets: dict[int, list[str]] = settings.get("general_topic_buckets", {}) or {}
-            seed = abs(source_chat_id) if source_chat_id else 0
+
+            mode = (settings.get("unrouted_distribution_mode") or "source").strip().lower()
+            if mode == "message" and seed is not None:
+                idx_seed = abs(int(seed))
+            else:
+                idx_seed = abs(source_chat_id) if source_chat_id else 0
+
             out: list[dict[str, Any]] = []
             for cid in settings.get("dest_channels", []) or []:
                 topics = buckets.get(int(cid)) or []
                 if topics:
-                    out.append({"chat_id": int(cid), "topic_title": topics[seed % len(topics)]})
+                    out.append({"chat_id": int(cid), "topic_title": topics[idx_seed % len(topics)]})
                 else:
                     out.append({"chat_id": int(cid)})
             return out
@@ -249,7 +281,7 @@ class RelayBot:
             if self.current_settings().get("strip_text"):
                 caption = None
 
-            for dest in self.resolve_destinations(source_chat_id):
+            for dest in self.resolve_destinations(source_chat_id, seed=gid):
                 chat_id = int(dest["chat_id"])
                 topic_title = dest.get("topic_title")
 
@@ -309,7 +341,7 @@ class RelayBot:
         if self.current_settings().get("strip_text"):
             text = ""
 
-        for dest in self.resolve_destinations(source_chat_id):
+        for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
             chat_id = int(dest["chat_id"])
             topic_title = dest.get("topic_title")
 

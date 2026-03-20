@@ -1,9 +1,17 @@
 import argparse
 import asyncio
 import json
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from telethon import TelegramClient
+
+# When executed as a script (python scripts/list_dialogs.py), Python puts /app/scripts
+# on sys.path which prevents importing modules from the repo root.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from common_config import ConfigManager, load_userbot_settings
 
@@ -33,13 +41,18 @@ async def main() -> None:
         default=[],
         help="Filter by type: user|chat|supergroup|channel (can be repeated)",
     )
+    p.add_argument(
+        "--session",
+        default="anon",
+        help="Telethon session name (default: anon). If you see sqlite 'database is locked', stop the userbot or use a different session.",
+    )
     args = p.parse_args()
     type_filter = set(args.types or [])
 
     cm = ConfigManager()
     s = load_userbot_settings(cm)
 
-    client = TelegramClient("anon", s["api_id"], s["api_hash"], proxy=s.get("proxy"))
+    client = TelegramClient(str(args.session), s["api_id"], s["api_hash"], proxy=s.get("proxy"))
     await client.start()
 
     # JSON Lines output so it's easy to grep/filter without breaking on special chars.
