@@ -139,6 +139,11 @@ async def main() -> None:
     p = argparse.ArgumentParser(description="Create/rename/hide forum topics based on config.json")
     p.add_argument("--config", default="config.json", help="Path to config.json (default: config.json)")
     p.add_argument("--dry-run", action="store_true", help="Print actions without modifying topics")
+    p.add_argument(
+        "--session",
+        default="bot_session",
+        help="Telethon session name (default: bot_session). Stop relaybot first or use a different session if you get sqlite 'database is locked'.",
+    )
     args = p.parse_args()
 
     logger = get_logger("topic_sync")
@@ -148,7 +153,7 @@ async def main() -> None:
     relay_cfg = cfg.get("relay", {}) or {}
     settings = load_relay_settings(cm)
 
-    client = TelegramClient("bot_session", settings["api_id"], settings["api_hash"])
+    client = TelegramClient(str(args.session), settings["api_id"], settings["api_hash"])
     await client.start(bot_token=settings["bot_token"])
 
     ensure = relay_cfg.get("ensure_forum_topics", []) or []
