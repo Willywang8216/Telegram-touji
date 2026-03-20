@@ -59,6 +59,30 @@ class TestCommonConfig(unittest.TestCase):
         s = load_relay_settings(m)
         self.assertEqual(s["master_account_id"], 123)
 
+    def test_load_forum_topic_management_fields(self):
+        cfg = json.loads(self.path.read_text(encoding="utf-8"))
+        cfg["relay"].update(
+            {
+                "distribute_unrouted_to_buckets": True,
+                "unrouted_distribution_mode": "message",
+                "general_topic_buckets": {"-100": ["A", "B"]},
+                "ensure_forum_topics": [{"chat_id": "-100", "topics": ["T1", "T2"]}],
+                "topic_renames": {"-100": {"Old": "New"}},
+                "topic_deletes": {"-100": ["DeleteMe"]},
+            }
+        )
+        self.path.write_text(json.dumps(cfg), encoding="utf-8")
+
+        m = ConfigManager(str(self.path))
+        s = load_relay_settings(m)
+
+        self.assertTrue(s["distribute_unrouted_to_buckets"])
+        self.assertEqual(s["unrouted_distribution_mode"], "message")
+        self.assertEqual(s["general_topic_buckets"], {-100: ["A", "B"]})
+        self.assertEqual(s["ensure_forum_topics"], [{"chat_id": -100, "topics": ["T1", "T2"]}])
+        self.assertEqual(s["topic_renames"], {-100: {"Old": "New"}})
+        self.assertEqual(s["topic_deletes"], {-100: ["DeleteMe"]})
+
     def test_save(self):
         m = ConfigManager(str(self.path))
         cfg = m.load()

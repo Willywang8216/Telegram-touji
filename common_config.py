@@ -173,6 +173,55 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
                 continue
             general_topic_buckets_norm[chat_id] = [str(x) for x in v if str(x).strip()]
 
+    ensure_forum_topics_raw = relay.get("ensure_forum_topics", [])
+    ensure_forum_topics: list[dict[str, Any]] = []
+    if isinstance(ensure_forum_topics_raw, list):
+        for item in ensure_forum_topics_raw:
+            if not isinstance(item, dict):
+                continue
+            if "chat_id" not in item:
+                continue
+            try:
+                chat_id = _normalize_chat_id(item["chat_id"])
+            except Exception:  # noqa: BLE001
+                continue
+            topics = item.get("topics", []) or []
+            if not isinstance(topics, list):
+                continue
+            topics_norm = [str(x) for x in topics if str(x).strip()]
+            ensure_forum_topics.append({"chat_id": chat_id, "topics": topics_norm})
+
+    topic_renames_raw = relay.get("topic_renames", {})
+    topic_renames: dict[int, dict[str, str]] = {}
+    if isinstance(topic_renames_raw, dict):
+        for k, v in topic_renames_raw.items():
+            try:
+                chat_id = _normalize_chat_id(k)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(v, dict):
+                continue
+            mapping: dict[str, str] = {}
+            for old, new in v.items():
+                if str(old).strip() and str(new).strip():
+                    mapping[str(old)] = str(new)
+            if mapping:
+                topic_renames[chat_id] = mapping
+
+    topic_deletes_raw = relay.get("topic_deletes", {})
+    topic_deletes: dict[int, list[str]] = {}
+    if isinstance(topic_deletes_raw, dict):
+        for k, v in topic_deletes_raw.items():
+            try:
+                chat_id = _normalize_chat_id(k)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(v, list):
+                continue
+            titles = [str(x) for x in v if str(x).strip()]
+            if titles:
+                topic_deletes[chat_id] = titles
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
@@ -193,4 +242,8 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         # "message": bucket varies per forwarded message/album (more even distribution)
         "unrouted_distribution_mode": str(relay.get("unrouted_distribution_mode", "source") or "source"),
         "general_topic_buckets": general_topic_buckets_norm,
+        # Optional forum topic management (used by bot_relay.py)
+        "ensure_forum_topics": ensure_forum_topics,
+        "topic_renames": topic_renames,
+        "topic_deletes": topic_deletes,
     }
