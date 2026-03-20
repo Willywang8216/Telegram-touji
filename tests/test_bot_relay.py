@@ -144,7 +144,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
             rate_limiter=FakeRateLimiter(),
         )
 
-        # 7 % 5 == 2 -> T3
+        # source-based: abs(7) % 5 == 2 -> T3
         msg = FakeMessage(
             message_id=10,
             media=None,
@@ -160,6 +160,44 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         await bot.handle(event)
         self.assertEqual(client.calls, [("send_message", -100, "hello", 77)])
+
+    async def test_unrouted_distribution_mode_message_uses_message_id_seed(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-100],
+                "master_account_id": 0,
+                "distribute_unrouted_to_buckets": True,
+                "unrouted_distribution_mode": "message",
+                "general_topic_buckets": {
+                    -100: ["T1", "T2", "T3", "T4", "T5"],
+                },
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        # message-based: msg.id=11 -> 11 % 5 == 1 -> T2
+        msg = FakeMessage(
+            message_id=11,
+            media=None,
+            raw_text="hello",
+            fwd_from=FakeForwardHeader(types.PeerChannel(999)),
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
+
+        seen = {}
+
+        async def fake_get_or_create_top_message_id(chat_id, title):
+            seen["title"] = title
+            return 88
+
+        bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
+
+        await bot.handle(event)
+        self.assertEqual(seen.get("title"), "T2")
+        self.assertEqual(client.calls, [("send_message", -100, "hello", 88)])
 
     async def test_unauthorized_sender_blocked_when_enabled(self):
         client = FakeClient()
