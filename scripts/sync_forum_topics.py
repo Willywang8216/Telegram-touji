@@ -4,325 +4,210 @@ import json
 import sys
 from pathlib import Path
 
-# Ensure repo root is on sys.path when running as `python scripts/xxx.py`
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from telethon import TelegramClient, functions
 
-from telethon import TelegramClient, functions, types
-from telethon.errors.rpcbaseerrors import BadRequestError
+# Allow running as "python scripts/sync_forum_topics.py".
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-from common_config import ConfigManager, load_userbot_settings
-
-
-def _topic_title_variants(title: str) -> list[str]:
-    if not title:
-        return []
-
-    t = str(title)
-    out = [t]
-
-    # If config topic names have a leading emoji ("🍑 Foo"), allow matching old titles.
-    if " " in t:
-        first, rest = t.split(" ", 1)
-        if len(first) <= 8 and rest:
-            out.append(rest)
-
-    return out
+from common_config import ConfigManager, load_relay_settings
+from structured_logger import get_logger, log_event
 
 
-async def list_topics(client: TelegramClient, peer):
-    entity = await client.get_entity(peer)
+async def _get_forum_topic(client: TelegramClient, peer, title: str):
     res = await client(
         functions.messages.GetForumTopicsRequest(
-            peer=entity,
-            offset_date=None,
+            peer=peer,
+            q=title,
+            offset_date=0,
             offset_id=0,
             offset_topic=0,
             limit=100,
-            q="",
         )
     )
-    return entity, list(res.topics)
+    for t in getattr(res, "topics", []) or []:
+        if getattr(t, "title", None) == title:
+            return t
+    return None
 
 
-async def find_topic(client: TelegramClient, peer, title: str):
-    entity = await client.get_entity(peer)
+async def _ensure_topic(client: TelegramClient, peer, chat_id: int, title: str, *, dry_run: bool, logger):
+    existing = await _get_forum_topic(client, peer, title)
+    if existing is not None:
+        return
 
-    for q in _topic_title_variants(title):
-        res = await client(
-            functions.messages.GetForumTopicsRequest(
-                peer=entity,
-                offset_date=None,
-                offset_id=0,
-                offset_topic=0,
-                limit=50,
-                q=str(q),
-            )
-        )
-        for t in list(res.topics):
-            if t.title == title or t.title == str(q):
-                return entity, t
+    if dry_run:
+        log_event(logger, 20, "forum_topic_would_create", chat_id=chat_id, title=title)
+        return
 
-    return entity, None
-
-
-async def _default_topic_icon_ids(client: TelegramClient) -> dict[str, int]:
-    res = await client(
-        functions.messages.GetStickerSetRequest(
-            stickerset=types.InputStickerSetEmojiDefaultTopicIcons(),
-            hash=0,
+    await client(
+        functions.messages.CreateForumTopicRequest(
+            peer=peer,
+            title=title,
         )
     )
-
-    if not hasattr(res, "documents"):
-        return {}
-
-    out: dict[str, int] = {}
-    for doc in res.documents:
-        alt = None
-        for attr in getattr(doc, "attributes", []) or []:
-            if isinstance(attr, types.DocumentAttributeCustomEmoji):
-                alt = getattr(attr, "alt", None)
-                break
-        if not alt:
-            continue
-        out.setdefault(str(alt), int(doc.id))
-
-    return out
+    log_event(logger, 20, "forum_topic_created", chat_id=chat_id, title=title)
 
 
-def _is_topic_not_modified(exc: Exception) -> bool:
-    return "topic_not_modified" in str(exc).lower()
-
-
-def _is_chat_not_modified(exc: Exception) -> bool:
-    return "chat_not_modified" in str(exc).lower() or "CHAT_NOT_MODIFIED" in str(exc)
-
-
-async def apply_chat_title_renames(client: TelegramClient, chat_title_renames: dict[str, str]) -> None:
-    if not chat_title_renames:
+async def _rename_topic(client: TelegramClient, peer, chat_id: int, old_title: str, new_title: str, *, dry_run: bool, logger):
+    t = await _get_forum_topic(client, peer, old_title)
+    if t is None:
         return
 
-    for peer, new_title in chat_title_renames.items():
-        if not peer or not new_title:
-            continue
-
-        try:
-            entity = await client.get_entity(int(peer))
-            await client(functions.channels.EditTitleRequest(channel=entity, title=str(new_title)))
-            print(f"Renamed chat {peer} to '{new_title}'")
-        except Exception as exc:  # noqa: BLE001
-            if _is_chat_not_modified(exc):
-                print(f"Chat {peer} already has title '{new_title}', skipping.")
-                continue
-            raise
-
-
-async def apply_topic_renames(client: TelegramClient, peer, renames: dict[str, str]) -> None:
-    if not renames:
+    topic_id = int(getattr(t, "id", 0) or 0)
+    if not topic_id:
         return
 
-    for old, new in renames.items():
-        if not old or not new or old == new:
-            continue
-
-        entity, topic = await find_topic(client, peer, str(old))
-        if not topic:
-            continue
-
-        _, new_topic = await find_topic(client, peer, str(new))
-        if new_topic:
-            continue
-
-        try:
-            await client(functions.messages.EditForumTopicRequest(peer=entity, topic_id=int(topic.id), title=str(new)))
-        except BadRequestError as exc:
-            if _is_topic_not_modified(exc):
-                continue
-            raise
-
-
-async def apply_topic_deletes(client: TelegramClient, peer, delete_titles: list[str]) -> None:
-    if not delete_titles:
+    if dry_run:
+        log_event(
+            logger,
+            20,
+            "forum_topic_would_rename",
+            chat_id=chat_id,
+            topic_id=topic_id,
+            old_title=old_title,
+            new_title=new_title,
+        )
         return
 
-    for title in delete_titles:
-        if not title:
-            continue
-
-        entity, topic = await find_topic(client, peer, str(title))
-        if not topic:
-            continue
-
-        # Deleting a forum topic is done by deleting its history using the topic top message id.
-        await client(functions.messages.DeleteTopicHistoryRequest(peer=entity, top_msg_id=int(topic.top_message)))
+    await client(
+        functions.messages.EditForumTopicRequest(
+            peer=peer,
+            topic_id=topic_id,
+            title=new_title,
+        )
+    )
+    log_event(logger, 20, "forum_topic_renamed", chat_id=chat_id, topic_id=topic_id, old_title=old_title, new_title=new_title)
 
 
-async def apply_topic_icons(
-    client: TelegramClient,
-    peer,
-    topic_icon_emojis: dict[str, str],
-    default_icon_ids: dict[str, int],
-) -> None:
-    if not topic_icon_emojis:
-        return
-    if not default_icon_ids:
+async def _delete_topic_history_and_hide(client: TelegramClient, peer, chat_id: int, title: str, *, dry_run: bool, logger):
+    t = await _get_forum_topic(client, peer, title)
+    if t is None:
         return
 
-    for title, emoji in topic_icon_emojis.items():
-        if not title or not emoji:
-            continue
+    topic_id = int(getattr(t, "id", 0) or 0)
+    top_message = int(getattr(t, "top_message", 0) or 0)
+    if not topic_id:
+        return
 
-        entity, t = await find_topic(client, peer, str(title))
-        if not t:
-            continue
+    if dry_run:
+        log_event(
+            logger,
+            20,
+            "forum_topic_would_delete",
+            chat_id=chat_id,
+            topic_id=topic_id,
+            title=title,
+            top_message=top_message or None,
+        )
+        return
 
-        icon_id = default_icon_ids.get(str(emoji))
-        if not icon_id:
-            continue
-
-        try:
-            await client(
-                functions.messages.EditForumTopicRequest(
-                    peer=entity,
-                    topic_id=int(t.id),
-                    icon_emoji_id=int(icon_id),
-                )
-            )
-        except BadRequestError as exc:
-            if _is_topic_not_modified(exc):
-                continue
-            raise
-
-
-async def ensure_topics(
-    client: TelegramClient,
-    peer,
-    titles: list[str],
-    topic_icon_emojis: dict[str, str] | None = None,
-    default_icon_ids: dict[str, int] | None = None,
-):
-    topic_icon_emojis = topic_icon_emojis or {}
-    default_icon_ids = default_icon_ids or {}
-
-    out: dict[str, int] = {}
-
-    for title in titles:
-        if not title:
-            continue
-
-        entity, existing_topic = await find_topic(client, peer, str(title))
-        if existing_topic:
-            out[str(title)] = int(existing_topic.top_message)
-            continue
-
-        icon_emoji_id = None
-        emoji = topic_icon_emojis.get(str(title))
-        if emoji:
-            icon_emoji_id = default_icon_ids.get(str(emoji))
-
+    # Best-effort: clear history (removes messages in the topic), then hide it.
+    if top_message:
         await client(
-            functions.messages.CreateForumTopicRequest(
-                peer=entity,
-                title=str(title),
-                icon_color=0x6FB9F0,
-                icon_emoji_id=int(icon_emoji_id) if icon_emoji_id else None,
+            functions.messages.DeleteTopicHistoryRequest(
+                peer=peer,
+                top_msg_id=top_message,
             )
         )
 
-        _, created = await find_topic(client, peer, str(title))
-        if created:
-            out[str(title)] = int(created.top_message)
+    await client(
+        functions.messages.EditForumTopicRequest(
+            peer=peer,
+            topic_id=topic_id,
+            hidden=True,
+            closed=True,
+        )
+    )
+    log_event(logger, 20, "forum_topic_deleted", chat_id=chat_id, topic_id=topic_id, title=title)
 
+
+def _as_int_keyed_map(value):
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for k, v in value.items():
+        try:
+            out[int(k)] = v
+        except Exception:
+            continue
     return out
 
 
-async def main():
-    parser = argparse.ArgumentParser(description="Ensure forum topics exist and write topic->top_message mapping into config")
-    parser.add_argument("--config", default="config.json", help="Path to config.json")
-    parser.add_argument("--write", action="store_true", help="Write mapping into relay.forum_topic_top_messages")
-    parser.add_argument("--rename", action="store_true", help="Apply relay.topic_renames before syncing")
-    parser.add_argument("--icons", action="store_true", help="Apply relay.topic_icon_emojis (default icon pack)")
-    parser.add_argument("--delete", action="store_true", help="Apply relay.topic_deletes before syncing")
-    parser.add_argument("--rename-chats", action="store_true", help="Apply relay.chat_title_renames")
-    args = parser.parse_args()
+async def main() -> None:
+    p = argparse.ArgumentParser(description="Create/rename/hide forum topics based on config.json")
+    p.add_argument("--config", default="config.json", help="Path to config.json (default: config.json)")
+    p.add_argument("--dry-run", action="store_true", help="Print actions without modifying topics")
+    p.add_argument(
+        "--session",
+        default="bot_session",
+        help="Telethon session name (default: bot_session). Stop relaybot first or use a different session if you get sqlite 'database is locked'.",
+    )
+    args = p.parse_args()
 
-    config_manager = ConfigManager(args.config)
-    cfg = config_manager.load(force=True)
+    logger = get_logger("topic_sync")
 
-    relay = cfg.get("relay") or {}
-    ensure = relay.get("ensure_forum_topics") or []
-    if not ensure:
-        raise SystemExit("relay.ensure_forum_topics is empty")
+    cm = ConfigManager(args.config)
+    cfg = cm.load(force=True)
+    relay_cfg = cfg.get("relay", {}) or {}
+    settings = load_relay_settings(cm)
 
-    settings = load_userbot_settings(config_manager)
-    session_dir = Path("data/sessions")
-    session_dir.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(str(session_dir / "userbot_tools"), settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
-    await client.start()
+    client = TelegramClient(str(args.session), settings["api_id"], settings["api_hash"])
+    await client.start(bot_token=settings["bot_token"])
 
-    try:
-        out: dict[str, dict[str, int]] = {}
-        renames_cfg = relay.get("topic_renames") or {}
-        icons_cfg = relay.get("topic_icon_emojis") or {}
-        deletes_cfg = relay.get("topic_deletes") or {}
+    ensure = relay_cfg.get("ensure_forum_topics", []) or []
+    renames = _as_int_keyed_map(relay_cfg.get("topic_renames", {}) or {})
+    deletes = _as_int_keyed_map(relay_cfg.get("topic_deletes", {}) or {})
 
-        if args.rename_chats:
-            chat_title_renames = relay.get("chat_title_renames") or {}
-            if isinstance(chat_title_renames, dict) and chat_title_renames:
-                await apply_chat_title_renames(client, {str(k): str(v) for k, v in chat_title_renames.items()})
-
-        default_icon_ids: dict[str, int] = {}
-        if args.icons:
-            default_icon_ids = await _default_topic_icon_ids(client)
-
-        for item in ensure:
-            chat_id = item.get("chat_id")
-            titles = [str(t) for t in (item.get("topics") or [])]
-            if not chat_id or not titles:
+    # 1) renames first (so ensure runs on final names)
+    for chat_id, mapping in renames.items():
+        if not isinstance(mapping, dict):
+            continue
+        peer = await client.get_input_entity(int(chat_id))
+        for old_title, new_title in mapping.items():
+            if not old_title or not new_title:
                 continue
-
-            peer = int(chat_id)
-
-            if args.delete:
-                chat_deletes = deletes_cfg.get(str(peer)) or deletes_cfg.get(peer) or []
-                if isinstance(chat_deletes, list) and chat_deletes:
-                    await apply_topic_deletes(client, peer, [str(x) for x in chat_deletes if x])
-
-            if args.rename:
-                chat_renames = renames_cfg.get(str(peer)) or renames_cfg.get(peer) or {}
-                if isinstance(chat_renames, dict) and chat_renames:
-                    await apply_topic_renames(client, peer, {str(k): str(v) for k, v in chat_renames.items()})
-
-            chat_icons = icons_cfg.get(str(peer)) or icons_cfg.get(peer) or {}
-            if not isinstance(chat_icons, dict):
-                chat_icons = {}
-
-            existing = await ensure_topics(
+            await _rename_topic(
                 client,
                 peer,
-                titles,
-                topic_icon_emojis={str(k): str(v) for k, v in chat_icons.items()},
-                default_icon_ids=default_icon_ids,
+                int(chat_id),
+                str(old_title),
+                str(new_title),
+                dry_run=bool(args.dry_run),
+                logger=logger,
             )
 
-            if args.icons and chat_icons:
-                await apply_topic_icons(
-                    client,
-                    peer,
-                    topic_icon_emojis={str(k): str(v) for k, v in chat_icons.items()},
-                    default_icon_ids=default_icon_ids,
-                )
+    # 2) ensure topics exist
+    for item in ensure:
+        if not isinstance(item, dict) or "chat_id" not in item:
+            continue
+        chat_id = int(item["chat_id"])
+        topics = item.get("topics", []) or []
+        peer = await client.get_input_entity(chat_id)
+        for title in topics:
+            if not title:
+                continue
+            await _ensure_topic(client, peer, chat_id, str(title), dry_run=bool(args.dry_run), logger=logger)
 
-            out[str(peer)] = {t: int(existing[t]) for t in titles if t in existing}
+    # 3) deletions (hide + clear history)
+    for chat_id, titles in deletes.items():
+        if not isinstance(titles, list):
+            continue
+        peer = await client.get_input_entity(int(chat_id))
+        for title in titles:
+            if not title:
+                continue
+            await _delete_topic_history_and_hide(
+                client,
+                peer,
+                int(chat_id),
+                str(title),
+                dry_run=bool(args.dry_run),
+                logger=logger,
+            )
 
-        print(json.dumps(out, ensure_ascii=False, indent=2))
-
-        if args.write:
-            relay["forum_topic_top_messages"] = out
-            cfg["relay"] = relay
-            config_manager.save(cfg)
-    finally:
-        await client.disconnect()
+    await client.disconnect()
 
 
 if __name__ == "__main__":

@@ -10,6 +10,9 @@ class TestSyntax(unittest.TestCase):
             Path("bot_relay.py"),
             Path("common_config.py"),
             Path("command_utils.py"),
+            Path("delivery.py"),
+            Path("structured_logger.py"),
+            Path("scripts/sync_forum_topics.py"),
         ]
         for p in files:
             with self.subTest(file=str(p)):

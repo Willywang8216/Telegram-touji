@@ -69,15 +69,20 @@ class ForumTopicResolver:
         if title in chat_cache:
             return chat_cache[title]
 
-        top = await self._find_topic_top_message_id(chat_id, title)
-        if top is None:
-            top = await self._create_topic(chat_id, title)
+        topic = await self.find_topic(chat_id, title)
+        if topic is None:
+            await self._create_topic(chat_id, title)
+            topic = await self.find_topic(chat_id, title)
 
+        top = int(topic["top_message"]) if topic else None
         if top is not None:
             chat_cache[title] = top
         return top
 
-    async def _find_topic_top_message_id(self, chat_id: int, title: str) -> int | None:
+    async def clear_cache(self, chat_id: int) -> None:
+        self._cache.pop(int(chat_id), None)
+
+    async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
         try:
             peer = await self.client.get_input_entity(chat_id)
             res = await self.client(
@@ -92,7 +97,10 @@ class ForumTopicResolver:
             )
             for t in getattr(res, "topics", []) or []:
                 if getattr(t, "title", None) == title:
-                    return int(getattr(t, "top_message", 0) or 0) or None
+                    topic_id = int(getattr(t, "id", 0) or 0)
+                    top_message = int(getattr(t, "top_message", 0) or 0)
+                    if topic_id and top_message:
+                        return {"topic_id": topic_id, "top_message": top_message}
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
@@ -104,26 +112,16 @@ class ForumTopicResolver:
             )
         return None
 
-    async def _create_topic(self, chat_id: int, title: str) -> int | None:
+    async def _create_topic(self, chat_id: int, title: str) -> None:
         try:
             peer = await self.client.get_input_entity(chat_id)
-            res = await self.client(
+            await self.client(
                 functions.messages.CreateForumTopicRequest(
                     peer=peer,
                     title=title,
                 )
             )
-
-            # Try to extract the newly created topic's top message ID from the updates.
-            for upd in (getattr(res, "updates", None) or []):
-                msg = getattr(upd, "message", None)
-                if msg is not None and getattr(msg, "id", None):
-                    top = int(getattr(msg, "id"))
-                    log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title, top_message=top)
-                    return top
-
             log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title)
-            return None
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
@@ -133,7 +131,6 @@ class ForumTopicResolver:
                 title=title,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            return None
 
 
 class RelayBot:
@@ -202,6 +199,122 @@ class RelayBot:
             return list(settings.get("default_destinations") or [])
 
         return [{"chat_id": int(x)} for x in settings.get("dest_channels", [])]
+
+    async def sync_forum_topics(self) -> None:
+        settings = self.current_settings()
+
+        required: dict[int, set[str]] = {}
+
+        def add(chat_id: int, title: str | None) -> None:
+            if not title:
+                return
+            required.setdefault(int(chat_id), set()).add(str(title))
+
+        for item in settings.get("ensure_forum_topics", []) or []:
+            if not isinstance(item, dict) or "chat_id" not in item:
+                continue
+            cid = int(item["chat_id"])
+            for t in item.get("topics", []) or []:
+                add(cid, t)
+
+        for cid, topics in (settings.get("general_topic_buckets") or {}).items():
+            for t in topics or []:
+                add(int(cid), t)
+
+        for r in settings.get("routes", []) or []:
+            for d in r.get("destinations", []) or []:
+                add(int(d.get("chat_id")), d.get("topic_title"))
+
+        for d in settings.get("default_destinations", []) or []:
+            add(int(d.get("chat_id")), d.get("topic_title"))
+
+        for cid, title in (settings.get("fallback_topic_titles") or {}).items():
+            add(int(cid), title)
+
+        for chat_id, renames in (settings.get("topic_renames") or {}).items():
+            if not isinstance(renames, dict):
+                continue
+            for old, new in renames.items():
+                if not old or not new or old == new:
+                    continue
+
+                old_topic = await self.topic_resolver.find_topic(int(chat_id), str(old))
+                if not old_topic:
+                    continue
+                new_topic = await self.topic_resolver.find_topic(int(chat_id), str(new))
+                if new_topic:
+                    continue
+
+                try:
+                    peer = await self.client.get_input_entity(int(chat_id))
+                    await self.client(
+                        functions.messages.EditForumTopicRequest(
+                            peer=peer,
+                            topic_id=int(old_topic["topic_id"]),
+                            title=str(new),
+                        )
+                    )
+                    await self.topic_resolver.clear_cache(int(chat_id))
+                    log_event(self.logger, logging.INFO, "forum_topic_renamed", chat_id=int(chat_id), old=str(old), new=str(new))
+                except Exception as exc:  # noqa: BLE001
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "forum_topic_rename_failed",
+                        chat_id=int(chat_id),
+                        old=str(old),
+                        new=str(new),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
+        for chat_id, titles in (settings.get("topic_deletes") or {}).items():
+            for title in titles or []:
+                topic = await self.topic_resolver.find_topic(int(chat_id), str(title))
+                if not topic:
+                    continue
+                try:
+                    peer = await self.client.get_input_entity(int(chat_id))
+                    await self.client(
+                        functions.messages.DeleteTopicHistoryRequest(
+                            peer=peer,
+                            top_msg_id=int(topic["top_message"]),
+                        )
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "forum_topic_delete_history_failed",
+                        chat_id=int(chat_id),
+                        title=str(title),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
+                try:
+                    peer = await self.client.get_input_entity(int(chat_id))
+                    await self.client(
+                        functions.messages.EditForumTopicRequest(
+                            peer=peer,
+                            topic_id=int(topic["topic_id"]),
+                            hidden=True,
+                            closed=True,
+                        )
+                    )
+                    await self.topic_resolver.clear_cache(int(chat_id))
+                    log_event(self.logger, logging.INFO, "forum_topic_hidden", chat_id=int(chat_id), title=str(title))
+                except Exception as exc:  # noqa: BLE001
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "forum_topic_hide_failed",
+                        chat_id=int(chat_id),
+                        title=str(title),
+                        error=f"{type(exc).__name__}: {exc}",
+                    )
+
+        for chat_id, titles in required.items():
+            for title in sorted(titles):
+                await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(title))
 
     def _post_caption_for(self, chat_id: int) -> str | None:
         captions = self.current_settings().get("post_captions", {}) or {}
@@ -454,6 +567,8 @@ async def main() -> None:
 
     client = await start_relay_client(settings, logger)
     bot = RelayBot(client, config_manager, settings, logger=logger)
+
+    await bot.sync_forum_topics()
 
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def handler(event):
