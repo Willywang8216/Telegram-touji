@@ -144,6 +144,9 @@
 
     "dest_channels": [-1002350290734, -1002349398833],
 
+    "manage_forum_topics": false,
+    "allow_topic_creation": false,
+
     "default_destinations": [
       {"chat_id": -1002350290734, "topic_title": "🧭 Default Route"},
       {"chat_id": -1002349398833, "topic_title": "🥘 大雜燴"}
@@ -174,68 +177,11 @@
       "-1002350290734": "🧭 Default Route"
     },
 
-    "topic_renames": {
-      "-1002350290734": {
-        "🍑 Asian Porn 1": "🔥 Hot Right Now",
-        "🍑 Asian Porn 2": "💪 Jocks & Twinks",
-        "🍑 Asian Porn 3": "🍑 Booty & Cumshots",
-        "🍑 Asian Porn 4": "🌙 After Dark Kinks",
-        "🍑 Asian Porn 5": "🎯 Hidden Gems"
-      },
-      "-1002349398833": {
-        "🍑 分流好看片片1": "🔥 今日爆熱",
-        "🍑 分流好看片片2": "💪 肌肉×鮮肉",
-        "🍑 分流好看片片3": "🍑 翹臀射爆",
-        "🍑 分流好看片片4": "🌙 深夜重口味",
-        "🍑 分流好看片片5": "🎯 冷門寶藏"
-      }
-    },
+    "topic_renames": {},
 
-    "topic_deletes": {
-      "-1002350290734": ["🇺🇸 English"],
-      "-1002349398833": ["🇹🇼 中文（繁體）"]
-    },
+    "topic_deletes": {},
 
-    "ensure_forum_topics": [
-      {
-        "chat_id": -1002350290734,
-        "topics": [
-          "🧭 Default Route",
-          "🔥 Hot Right Now",
-          "💪 Jocks & Twinks",
-          "🍑 Booty & Cumshots",
-          "🌙 After Dark Kinks",
-          "🎯 Hidden Gems",
-          "🇯🇵 Professional Japan Porn",
-          "🐻 Asian bear",
-          "🧜 Asian Ladyboy",
-          "🌍 Gay Westerner",
-          "📼 Retro gay porn",
-          "🔒 Gay Chastity",
-          "✋ Spank Fetish",
-          "👀 Gay Exhibitionism/Voyeur"
-        ]
-      },
-      {
-        "chat_id": -1002349398833,
-        "topics": [
-          "🥘 大雜燴",
-          "🔥 今日爆熱",
-          "💪 肌肉×鮮肉",
-          "🍑 翹臀射爆",
-          "🌙 深夜重口味",
-          "🎯 冷門寶藏",
-          "🇯🇵 日本專業片",
-          "🐻 大號熊熊",
-          "🧜 偽娘南娘瑟瑟",
-          "🌍 歐美GAY",
-          "📼 復古男同志片",
-          "🔒 鎖雞雞",
-          "✋ 不乖打屁屁",
-          "👀 戶外野裸露出"
-        ]
-      }
-    ],
+    "ensure_forum_topics": [],
 
     "routes": [
       {

@@ -256,7 +256,12 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         # "message": bucket varies per forwarded message/album (more even distribution)
         "unrouted_distribution_mode": str(relay.get("unrouted_distribution_mode", "source") or "source"),
         "general_topic_buckets": general_topic_buckets_norm,
-        # Optional forum topic management (used by bot_relay.py)
+        # Forum topic management (used by bot_relay.py)
+        # If false, bot_relay will not rename/hide/ensure topics at startup.
+        "manage_forum_topics": bool(relay.get("manage_forum_topics", True)),
+        # If false, bot_relay will NEVER create a topic on-demand.
+        "allow_topic_creation": bool(relay.get("allow_topic_creation", True)),
+        # Optional forum topic management details
         "ensure_forum_topics": ensure_forum_topics,
         "topic_renames": topic_renames,
         "topic_deletes": topic_deletes,

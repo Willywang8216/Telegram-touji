@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import re
 import tempfile
+import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -9,6 +11,7 @@ from telethon import TelegramClient, events, functions, types, utils
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from twitter_expand import download_tweet_media, extract_tweet_urls
+
 try:
     from structured_logger import get_logger, log_event
 except ModuleNotFoundError:  # pragma: no cover
@@ -27,8 +30,37 @@ except ModuleNotFoundError:  # pragma: no cover
     def log_event(logger: logging.Logger, level: int, message: str, **kwargs):
         logger.log(level, message)
 
+
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
+
+_TITLE_WS_RE = re.compile(r"\s+")
+
+
+def normalize_forum_topic_title(value: str) -> str:
+    # Prevent duplicate topic creation caused by Unicode/emoji differences such as:
+    # - "✋" vs "✋️" (variation selector)
+    # - topics created with icon emoji (title without emoji) vs a config title prefixed with emoji
+    # - different whitespace
+    s = unicodedata.normalize("NFKC", str(value or ""))
+    s = s.replace("\ufe0f", "").replace("\ufe0e", "")
+    s = _TITLE_WS_RE.sub(" ", s).strip()
+
+    # Strip leading emoji/symbol decorations (keeps normal punctuation like '[' intact).
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isspace():
+            i += 1
+            continue
+        cat = unicodedata.category(ch)
+        if cat in {"So", "Sk", "Cf"}:
+            i += 1
+            continue
+        break
+    s = s[i:].lstrip()
+
+    return s.casefold()
 
 
 @dataclass
@@ -67,76 +99,153 @@ def _extract_forward_source_chat_id(msg) -> int | None:
 
 
 class ForumTopicResolver:
-    def __init__(self, client: TelegramClient, logger):
+    def __init__(self, client: TelegramClient, logger, *, settings_getter: Callable[[], dict[str, Any]] | None = None):
         self.client = client
         self.logger = logger
-        self._cache: dict[int, dict[str, int]] = {}
+        self._settings_getter = settings_getter or (lambda: {})
+
+        # Cache: chat_id -> normalized_title -> {topic_id, top_message}
+        self._cache: dict[int, dict[str, dict[str, int]]] = {}
+
+    def _allow_creation(self) -> bool:
+        return bool((self._settings_getter() or {}).get("allow_topic_creation", True))
 
     async def get_or_create_top_message_id(self, chat_id: int, title: str) -> int | None:
-        chat_cache = self._cache.setdefault(chat_id, {})
-        if title in chat_cache:
-            return chat_cache[title]
+        key = normalize_forum_topic_title(title)
+        chat_cache = self._cache.setdefault(int(chat_id), {})
+        if key in chat_cache:
+            return int(chat_cache[key]["top_message"])
 
-        topic = await self.find_topic(chat_id, title)
+        topic = await self.find_topic(int(chat_id), title)
         if topic is None:
-            await self._create_topic(chat_id, title)
-            topic = await self.find_topic(chat_id, title)
+            if not self._allow_creation():
+                log_event(self.logger, logging.INFO, "forum_topic_missing_create_disabled", chat_id=int(chat_id), title=str(title))
+                return None
 
-        top = int(topic["top_message"]) if topic else None
-        if top is not None:
-            chat_cache[title] = top
-        return top
+            await self._create_topic(int(chat_id), str(title))
+            topic = await self.find_topic(int(chat_id), title)
+
+        if topic is not None:
+            chat_cache[key] = topic
+            return int(topic["top_message"])
+
+        return None
 
     async def clear_cache(self, chat_id: int) -> None:
         self._cache.pop(int(chat_id), None)
 
-    async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
-        try:
-            peer = await self.client.get_input_entity(chat_id)
+    def _pick_best_topic(self, matches: list[Any], *, chat_id: int, title: str) -> Any | None:
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topic_duplicates_detected",
+                chat_id=int(chat_id),
+                title=str(title),
+                duplicates=[{"id": int(getattr(t, "id", 0) or 0), "top_message": int(getattr(t, "top_message", 0) or 0), "hidden": bool(getattr(t, "hidden", False)), "pinned": bool(getattr(t, "pinned", False))} for t in matches],
+            )
+
+        # Prefer visible + pinned + most active.
+        matches.sort(
+            key=lambda t: (
+                bool(getattr(t, "hidden", False)),
+                not bool(getattr(t, "pinned", False)),
+                -int(getattr(t, "top_message", 0) or 0),
+                int(getattr(t, "id", 0) or 0),
+            )
+        )
+        return matches[0]
+
+    async def _collect_matching_topics(self, peer, *, title: str, q: str | None, max_pages: int) -> list[Any]:
+        needle = normalize_forum_topic_title(title)
+        matches: list[Any] = []
+
+        offset_topic = 0
+        offset_id = 0
+        for _ in range(max_pages):
             res = await self.client(
                 functions.messages.GetForumTopicsRequest(
                     peer=peer,
-                    q=title,
+                    q=q,
                     offset_date=0,
-                    offset_id=0,
-                    offset_topic=0,
+                    offset_id=int(offset_id),
+                    offset_topic=int(offset_topic),
                     limit=100,
                 )
             )
-            for t in getattr(res, "topics", []) or []:
-                if getattr(t, "title", None) == title:
-                    topic_id = int(getattr(t, "id", 0) or 0)
-                    top_message = int(getattr(t, "top_message", 0) or 0)
-                    if topic_id and top_message:
-                        return {"topic_id": topic_id, "top_message": top_message}
+            topics = list(getattr(res, "topics", []) or [])
+            if not topics:
+                break
+
+            for t in topics:
+                t_title = getattr(t, "title", None)
+                if t_title is None:
+                    continue
+                if normalize_forum_topic_title(str(t_title)) == needle:
+                    matches.append(t)
+
+            last = topics[-1]
+            next_offset_topic = int(getattr(last, "id", 0) or 0)
+            next_offset_id = int(getattr(last, "top_message", 0) or 0)
+            if (next_offset_topic, next_offset_id) == (offset_topic, offset_id):
+                break
+            offset_topic, offset_id = next_offset_topic, next_offset_id
+
+        return matches
+
+    async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
+        try:
+            peer = await self.client.get_input_entity(int(chat_id))
+
+            # First try with Telegram server-side search.
+            matches = await self._collect_matching_topics(peer, title=str(title), q=str(title), max_pages=5)
+            if not matches:
+                # Fallback: full scan (handles cases where q doesn't match emoji/VS16/etc).
+                matches = await self._collect_matching_topics(peer, title=str(title), q="", max_pages=20)
+
+            best = self._pick_best_topic(matches, chat_id=int(chat_id), title=str(title))
+            if best is None:
+                return None
+
+            topic_id = int(getattr(best, "id", 0) or 0)
+            top_message = int(getattr(best, "top_message", 0) or 0)
+            if topic_id and top_message:
+                return {"topic_id": topic_id, "top_message": top_message}
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
                 logging.INFO,
                 "forum_topics_list_failed",
-                chat_id=chat_id,
-                title=title,
+                chat_id=int(chat_id),
+                title=str(title),
                 error=f"{type(exc).__name__}: {exc}",
             )
         return None
 
     async def _create_topic(self, chat_id: int, title: str) -> None:
+        if not self._allow_creation():
+            log_event(self.logger, logging.INFO, "forum_topic_create_disabled", chat_id=int(chat_id), title=str(title))
+            return
+
         try:
-            peer = await self.client.get_input_entity(chat_id)
+            peer = await self.client.get_input_entity(int(chat_id))
             await self.client(
                 functions.messages.CreateForumTopicRequest(
                     peer=peer,
-                    title=title,
+                    title=str(title),
                 )
             )
-            log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title)
+            log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=int(chat_id), title=str(title))
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
                 logging.INFO,
                 "forum_topic_create_failed",
-                chat_id=chat_id,
-                title=title,
+                chat_id=int(chat_id),
+                title=str(title),
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -160,7 +269,7 @@ class RelayBot:
         self.rate_limiter = rate_limiter or AsyncRateLimiter(rate_per_sec=8)
         self.dlq_path = dlq_path
         self.logger = logger or get_logger("relaybot")
-        self.topic_resolver = ForumTopicResolver(client, self.logger)
+        self.topic_resolver = ForumTopicResolver(client, self.logger, settings_getter=self.current_settings)
 
         # Keyed by (chat_id, grouped_id) to avoid collisions across different private senders.
         self.media_group_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -213,7 +322,12 @@ class RelayBot:
     async def sync_forum_topics(self) -> None:
         settings = self.current_settings()
 
+        if not settings.get("manage_forum_topics", True):
+            log_event(self.logger, logging.INFO, "forum_topic_management_disabled")
+            return
+
         required: dict[int, set[str]] = {}
+}
 
         def add(chat_id: int, title: str | None) -> None:
             if not title:
@@ -322,9 +436,12 @@ class RelayBot:
                         error=f"{type(exc).__name__}: {exc}",
                     )
 
-        for chat_id, titles in required.items():
-            for title in sorted(titles):
-                await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(title))
+        if settings.get("allow_topic_creation", True):
+            for chat_id, titles in required.items():
+                for title in sorted(titles):
+                    await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(title))
+        else:
+            log_event(self.logger, logging.INFO, "forum_topic_creation_disabled_skip_sync")
 
     def _post_caption_for(self, chat_id: int) -> str | None:
         captions = self.current_settings().get("post_captions", {}) or {}
@@ -658,7 +775,10 @@ async def main() -> None:
     client = await start_relay_client(settings, logger)
     bot = RelayBot(client, config_manager, settings, logger=logger)
 
-    await bot.sync_forum_topics()
+    if settings.get("manage_forum_topics", True):
+        await bot.sync_forum_topics()
+    else:
+        log_event(logger, logging.INFO, "forum_topic_management_disabled")
 
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def handler(event):

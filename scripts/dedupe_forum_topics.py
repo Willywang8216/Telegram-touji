@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import re
 import sys
+import unicodedata
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -34,8 +35,25 @@ from structured_logger import get_logger, log_event
 
 
 def _normalize_title(title: str) -> str:
-    # Strip surrounding whitespace, and collapse consecutive whitespace.
-    return re.sub(r"\s+", " ", str(title or "").strip())
+    # Normalize common causes of duplicate titles:
+    # - variation selectors (e.g. "✋" vs "✋️")
+    # - leading emoji decorations
+    # - whitespace
+    s = re.sub(r"\s+", " ", str(title or "").strip())
+    s = s.replace("\ufe0f", "").replace("\ufe0e", "")
+
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isspace():
+            i += 1
+            continue
+        cat = unicodedata.category(ch)
+        if cat in {"So", "Sk", "Cf"}:
+            i += 1
+            continue
+        break
+    return s[i:].lstrip()
 
 
 def _date_to_ts(value) -> int:
