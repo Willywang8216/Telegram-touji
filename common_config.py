@@ -222,6 +222,17 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
             if titles:
                 topic_deletes[chat_id] = titles
 
+    twitter_cookies_file = _env_str(
+        "RELAY_TWITTER_COOKIES_FILE",
+        str(relay.get("twitter_cookies_file")) if relay.get("twitter_cookies_file") else None,
+    )
+    twitter_cookies_file = str(twitter_cookies_file) if twitter_cookies_file else None
+
+    try:
+        twitter_max_media_files = int(relay.get("twitter_max_media_files", 8) or 8)
+    except Exception:  # noqa: BLE001
+        twitter_max_media_files = 8
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
@@ -232,6 +243,9 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "strip_text": bool(relay.get("strip_text", False)),
         "post_captions": post_captions_norm,
         "blocklist_substrings": list(relay.get("blocklist_substrings", []) or []),
+        "expand_twitter_links": bool(relay.get("expand_twitter_links", True)),
+        "twitter_cookies_file": twitter_cookies_file,
+        "twitter_max_media_files": twitter_max_media_files,
         "routes": routes,
         "default_destinations": default_destinations,
         "fallback_topic_titles": fallback_topic_titles_norm,

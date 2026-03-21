@@ -1,11 +1,14 @@
 import asyncio
 import logging
-from typing import Any
+import tempfile
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from telethon import TelegramClient, events, functions, types, utils
 
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from twitter_expand import download_tweet_media, extract_tweet_urls
 try:
     from structured_logger import get_logger, log_event
 except ModuleNotFoundError:  # pragma: no cover
@@ -25,6 +28,14 @@ except ModuleNotFoundError:  # pragma: no cover
         logger.log(level, message)
 
 DLQ_PATH = "logs/relay_dlq.jsonl"
+MEDIA_CAPTION_LIMIT = 1024
+
+
+@dataclass
+class ExpandedMedia:
+    files: list[Any]
+    cleanup: Callable[[], None]
+    url: str
 
 
 async def _maybe_await(value):
@@ -137,6 +148,7 @@ class RelayBot:
         config_manager: ConfigManager,
         settings: dict[str, Any],
         *,
+        tweet_resolver=None,
         rate_limiter: AsyncRateLimiter | None = None,
         dlq_path: str = DLQ_PATH,
         logger=None,
@@ -144,6 +156,7 @@ class RelayBot:
         self.client = client
         self.config_manager = config_manager
         self.settings = settings
+        self.tweet_resolver = tweet_resolver
         self.rate_limiter = rate_limiter or AsyncRateLimiter(rate_per_sec=8)
         self.dlq_path = dlq_path
         self.logger = logger or get_logger("relaybot")
@@ -323,6 +336,53 @@ class RelayBot:
                 return True
         return False
 
+    async def _maybe_expand_twitter_media(self, original_text: str) -> ExpandedMedia | None:
+        settings = self.current_settings()
+        if not settings.get("expand_twitter_links", True):
+            return None
+
+        tweet_urls = extract_tweet_urls(original_text)
+        if not tweet_urls:
+            return None
+
+        url = tweet_urls[0]
+        tmp = tempfile.TemporaryDirectory(prefix="relaybot_tweet_")
+
+        cookies_file = settings.get("twitter_cookies_file")
+        max_files = int(settings.get("twitter_max_media_files", 8) or 8)
+
+        try:
+            if self.tweet_resolver is not None:
+                resolved = await _maybe_await(self.tweet_resolver.resolve(url))
+                if resolved:
+                    return ExpandedMedia(files=list(resolved), cleanup=tmp.cleanup, url=url)
+                tmp.cleanup()
+                return None
+
+            files = await asyncio.to_thread(
+                download_tweet_media,
+                url,
+                tmp.name,
+                cookies_file=cookies_file,
+                max_files=max_files,
+                logger=self.logger,
+            )
+            if not files:
+                tmp.cleanup()
+                return None
+
+            return ExpandedMedia(files=[str(p) for p in files], cleanup=tmp.cleanup, url=url)
+        except Exception as exc:  # noqa: BLE001
+            tmp.cleanup()
+            log_event(
+                self.logger,
+                logging.INFO,
+                "tweet_media_download_failed",
+                url=url,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
+
     async def handle(self, event) -> None:
         settings = self.current_settings()
 
@@ -419,7 +479,7 @@ class RelayBot:
                 await self.rate_limiter.wait()
                 try:
                     await with_retry(
-                        lambda: self.client.send_file(chat_id, files, caption=full_caption, reply_to=reply_to),
+                        lambda: self.client.send_file(chat_id, files, caption=self._trim_caption(full_caption), reply_to=reply_to),
                         retries=3,
                         base_delay=1,
                         logger=self.logger,
@@ -447,76 +507,109 @@ class RelayBot:
         except asyncio.CancelledError:
             return
 
+    def _trim_caption(self, text: str | None) -> str | None:
+        if not text:
+            return None
+        s = str(text)
+        if len(s) <= MEDIA_CAPTION_LIMIT:
+            return s
+        return s[: MEDIA_CAPTION_LIMIT - 1] + "…"
+
     async def send_copy(self, msg) -> None:
         source_chat_id = _extract_forward_source_chat_id(msg)
-        text = getattr(msg, "raw_text", "") or ""
+        original_text = getattr(msg, "raw_text", "") or ""
 
+        # We use the original text for tweet URL detection even if strip_text is enabled.
+        display_text = original_text
         if self.current_settings().get("strip_text"):
-            text = ""
+            display_text = ""
 
-        for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
-            chat_id = int(dest["chat_id"])
-            topic_title = dest.get("topic_title")
+        media = getattr(msg, "media", None)
+        uploadable_media = media is not None and not isinstance(media, types.MessageMediaWebPage)
 
-            post_caption = self._post_caption_for(chat_id)
-            full_text = text
-            if post_caption:
-                full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
+        expanded: ExpandedMedia | None = None
+        if not uploadable_media:
+            expanded = await self._maybe_expand_twitter_media(original_text)
 
-            if full_text and self._is_blocked(full_text):
-                log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
-                continue
+        try:
+            for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
+                chat_id = int(dest["chat_id"])
+                topic_title = dest.get("topic_title")
 
-            reply_to = None
-            if topic_title:
-                reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+                post_caption = self._post_caption_for(chat_id)
+                full_text = display_text
+                if post_caption:
+                    full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
 
-            if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
-                fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
-                if fallback:
-                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
-
-            await self.rate_limiter.wait()
-            try:
-                if getattr(msg, "media", None):
-                    await with_retry(
-                        lambda: self.client.send_file(chat_id, msg.media, caption=(full_text or None), reply_to=reply_to),
-                        retries=3,
-                        base_delay=1,
-                        logger=self.logger,
-                        action="send_message",
-                    )
-                elif full_text:
-                    await with_retry(
-                        lambda: self.client.send_message(chat_id, message=full_text, reply_to=reply_to),
-                        retries=3,
-                        base_delay=1,
-                        logger=self.logger,
-                        action="send_message",
-                    )
-                else:
-                    log_event(self.logger, logging.INFO, "message_skipped", chat_id=chat_id, message_id=msg.id)
+                if full_text and self._is_blocked(full_text):
+                    log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
 
-                log_event(
-                    self.logger,
-                    logging.INFO,
-                    "message_sent",
-                    chat_id=chat_id,
-                    topic_title=str(topic_title) if topic_title else None,
-                    message_id=msg.id,
-                    source_chat_id=source_chat_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                payload = {
-                    "chat_id": chat_id,
-                    "topic_title": str(topic_title) if topic_title else None,
-                    "message_id": msg.id,
-                    "source_chat_id": source_chat_id,
-                    "error": str(exc),
-                }
-                write_dlq(self.dlq_path, payload)
-                log_event(self.logger, logging.ERROR, "message_send_failed", **payload)
+                reply_to = None
+                if topic_title:
+                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+
+                if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
+                    fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
+                    if fallback:
+                        reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+
+                await self.rate_limiter.wait()
+                try:
+                    if uploadable_media:
+                        await with_retry(
+                            lambda: self.client.send_file(chat_id, media, caption=self._trim_caption(full_text), reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_message",
+                        )
+                    elif expanded is not None:
+                        await with_retry(
+                            lambda: self.client.send_file(chat_id, expanded.files, caption=self._trim_caption(full_text), reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_tweet_media",
+                        )
+                        log_event(self.logger, logging.INFO, "tweet_media_sent", chat_id=chat_id, url=expanded.url)
+                    elif full_text:
+                        await with_retry(
+                            lambda: self.client.send_message(chat_id, message=full_text, reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_message",
+                        )
+                    else:
+                        log_event(self.logger, logging.INFO, "message_skipped", chat_id=chat_id, message_id=msg.id)
+                        continue
+
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "message_sent",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title) if topic_title else None,
+                        message_id=msg.id,
+                        source_chat_id=source_chat_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    payload = {
+                        "chat_id": chat_id,
+                        "topic_title": str(topic_title) if topic_title else None,
+                        "message_id": msg.id,
+                        "source_chat_id": source_chat_id,
+                        "error": str(exc),
+                    }
+                    write_dlq(self.dlq_path, payload)
+                    log_event(self.logger, logging.ERROR, "message_send_failed", **payload)
+        finally:
+            if expanded is not None:
+                try:
+                    expanded.cleanup()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 async def start_relay_client(settings: dict[str, Any], logger) -> TelegramClient:

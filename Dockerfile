@@ -1,5 +1,11 @@
 FROM python:3.10-slim
 
+# System deps:
+# - ffmpeg: required by yt-dlp for some video formats (e.g., HLS) when downloading X/Twitter videos.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
 # 设置工作目录
 WORKDIR /app
 
