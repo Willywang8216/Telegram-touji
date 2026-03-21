@@ -1,0 +1,228 @@
+{
+  "api_id": 123456,
+  "api_hash": "REPLACE_ME",
+  "master_account_id": 123456789,
+
+  "bot_mappings": [
+    {"source_chat": -1002553556448, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001629796864, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002393626177, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002402135116, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002084109422, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002067867507, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001671049698, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002124773631, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1003652047670, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001696928273, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -769349313, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1003281205519, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002306050284, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002024729997, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002502271600, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -4695046886, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -4698084959, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1003579332390, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002490743575, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001628564125, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002177948690, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002409562497, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001610469476, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002316829227, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002519202761, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001324934276, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002911435149, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1002852607069, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002217337055, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001951349246, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001196731716, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001348978258, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001667507136, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002520119538, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1001170422687, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002834942876, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002267004918, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1001715232027, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001653838131, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002091206936, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1002837109291, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001160039423, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001815453153, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002957342657, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1001111651890, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1001744914488, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1002381619383, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002118370475, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002444769780, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1003800529499, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1003770002522, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002505838008, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1001610699588, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002358049067, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002024811384, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+
+    {"source_chat": -1002468021605, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"},
+    {"source_chat": -1002994454735, "target_bot": "@REPLACE_MIDDLE_RELAY_BOT"}
+  ],
+
+  "relay": {
+    "api_id": 123456,
+    "api_hash": "REPLACE_ME",
+    "bot_token": "REPLACE_ME",
+
+    "master_account_id": 123456789,
+    "allowed_sender_ids": [123456789],
+
+    "strip_text": true,
+
+    "dest_channels": [-1001230000001, -1001230000002],
+
+    "post_captions": {},
+
+    "expand_twitter_links": true,
+    "twitter_cookies_file": null,
+    "twitter_max_media_files": 8,
+
+    "manage_forum_topics": true,
+    "allow_topic_creation": true,
+
+    "default_destinations": [
+      {"chat_id": -1001230000001, "topic_title": "🔥 今日爆熱"},
+      {"chat_id": -1001230000002, "topic_title": "🔥 Hot Right Now"}
+    ],
+
+    "routes": [
+      {
+        "source_chats": [-1002553556448, -1001629796864, -1002393626177, -1002402135116, -1002084109422, -1002067867507, -1001671049698, -1002124773631, -1003652047670, -1001696928273, -769349313],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "👀 戶外野裸露出"},
+          {"chat_id": -1001230000002, "topic_title": "👀 Gay Exhibitionism/Voyeur"}
+        ]
+      },
+      {
+        "source_chats": [-1003281205519, -1002306050284, -1002024729997, -1002502271600, -4695046886, -4698084959],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "⛓️ 主奴調教"},
+          {"chat_id": -1001230000002, "topic_title": "⛓️ BDSM & Power"}
+        ]
+      },
+      {
+        "source_chats": [-1003579332390, -1002490743575, -1001628564125, -1002177948690, -1002409562497, -1001610469476, -1002316829227, -1002519202761, -1001324934276, -1002911435149],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "💪 肌肉×鮮肉"},
+          {"chat_id": -1001230000002, "topic_title": "💪 Jocks & Twinks"}
+        ]
+      },
+      {
+        "source_chats": [-1002852607069, -1002217337055, -1001951349246, -1001196731716, -1001348978258, -1001667507136, -1002520119538],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🧜 偽娘南娘瑟瑟"},
+          {"chat_id": -1001230000002, "topic_title": "🧜 Asian Ladyboy"}
+        ]
+      },
+      {
+        "source_chats": [-1001170422687, -1002834942876, -1002267004918],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "✋ 不乖打屁屁"},
+          {"chat_id": -1001230000002, "topic_title": "✋ Spank Fetish"}
+        ]
+      },
+      {
+        "source_chats": [-1001715232027, -1001653838131, -1002091206936],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🎯 冷門寶藏"},
+          {"chat_id": -1001230000002, "topic_title": "🔒 Gay Chastity"}
+        ]
+      },
+      {
+        "source_chats": [-1002837109291, -1001160039423, -1001815453153, -1002957342657],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "📱 抖音裸舞"},
+          {"chat_id": -1001230000002, "topic_title": "🔥 Hot Right Now"}
+        ]
+      },
+      {
+        "source_chats": [-1001111651890, -1001744914488],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🍑 翹臀精選"},
+          {"chat_id": -1001230000002, "topic_title": "🍑 Booty Highlights"}
+        ]
+      },
+      {
+        "source_chats": [-1002381619383, -1002118370475, -1002444769780, -1003800529499, -1003770002522, -1002505838008],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🌍 歐美GAY"},
+          {"chat_id": -1001230000002, "topic_title": "🔥 Hot Right Now"}
+        ]
+      },
+      {
+        "source_chats": [-1001610699588],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "📼 復古男同志片"},
+          {"chat_id": -1001230000002, "topic_title": "📼 Retro gay porn"}
+        ]
+      },
+      {
+        "source_chats": [-1002358049067, -1002024811384],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🇯🇵 日本GV"},
+          {"chat_id": -1001230000002, "topic_title": "🇯🇵 Professional Japan Porn"}
+        ]
+      },
+      {
+        "source_chats": [-1002468021605, -1002994454735],
+        "destinations": [
+          {"chat_id": -1001230000001, "topic_title": "🐻 大號熊熊"},
+          {"chat_id": -1001230000002, "topic_title": "🎯 Hidden Gems"}
+        ]
+      }
+    ],
+
+    "ensure_forum_topics": [
+      {
+        "chat_id": -1001230000001,
+        "topics": [
+          "🔥 今日爆熱",
+          "👀 戶外野裸露出",
+          "⛓️ 主奴調教",
+          "💪 肌肉×鮮肉",
+          "🧜 偽娘南娘瑟瑟",
+          "✋ 不乖打屁屁",
+          "📱 抖音裸舞",
+          "🍑 翹臀精選",
+          "🌍 歐美GAY",
+          "📼 復古男同志片",
+          "🇯🇵 日本GV",
+          "🐻 大號熊熊",
+          "🎯 冷門寶藏"
+        ]
+      },
+      {
+        "chat_id": -1001230000002,
+        "topics": [
+          "🔥 Hot Right Now",
+          "👀 Gay Exhibitionism/Voyeur",
+          "⛓️ BDSM & Power",
+          "💪 Jocks & Twinks",
+          "🧜 Asian Ladyboy",
+          "✋ Spank Fetish",
+          "🔒 Gay Chastity",
+          "🍑 Booty Highlights",
+          "📼 Retro gay porn",
+          "🇯🇵 Professional Japan Porn",
+          "🎯 Hidden Gems"
+        ]
+      }
+    ]
+  },
+
+  "proxy": null
+}
