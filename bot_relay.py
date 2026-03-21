@@ -327,7 +327,6 @@ class RelayBot:
             return
 
         required: dict[int, set[str]] = {}
-}
 
         def add(chat_id: int, title: str | None) -> None:
             if not title:
