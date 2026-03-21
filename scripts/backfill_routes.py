@@ -7,6 +7,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 # Ensure repo root is on sys.path when running as `python scripts/xxx.py`
@@ -332,6 +333,7 @@ async def backfill_one_destination(
     scan_limit: int,
     max_posts: int,
     sleep_between_posts: float,
+    since_dt: datetime | None,
     dry_run: bool,
 ) -> int:
     dest_topic_id, dest_top_message = await _resolve_or_create_topic(client, dest.chat_id, dest.topic_title)
@@ -341,6 +343,12 @@ async def backfill_one_destination(
     async for group in _iter_source_groups(client, source_chat_id, limit=scan_limit):
         msgs = sorted(group, key=lambda x: int(x.id))
         msg_ids = [int(m.id) for m in msgs]
+
+        if since_dt is not None:
+            newest = max((m.date for m in msgs if getattr(m, "date", None) is not None), default=None)
+            if newest is not None and newest < since_dt:
+                # We iterate newest -> oldest; once we cross the cutoff we can stop.
+                return posted
 
         if _is_used(conn, source_chat_id, msg_ids, dest.chat_id, dest_topic_id):
             continue
@@ -412,12 +420,30 @@ async def main():
     parser.add_argument("--dest-chat-id", type=int, action="append", help="Only backfill into these destination chats (can repeat)")
     parser.add_argument("--only-topic-title", help="Only backfill into this destination topic title (exact match)")
 
+    parser.add_argument("--since-days", type=int, help="Only backfill messages newer than N days ago (e.g. 90)")
+    parser.add_argument("--since-date", help="Only backfill messages newer than this date/time (ISO, e.g. 2026-01-01 or 2026-01-01T12:00:00Z)")
+
     parser.add_argument("--scan-limit", type=int, default=2000, help="How many recent source messages to scan")
     parser.add_argument("--max-posts", type=int, default=10, help="Max posts to send per destination")
     parser.add_argument("--sleep-between-posts", type=float, default=1.0, help="Delay between posts")
     parser.add_argument("--dry-run", action="store_true", help="Do not send anything, only print what would be sent")
 
     args = parser.parse_args()
+
+    since_dt: datetime | None = None
+    if args.since_days is not None and args.since_date is not None:
+        raise SystemExit("Use only one of --since-days or --since-date")
+
+    if args.since_days is not None:
+        since_dt = datetime.now(timezone.utc) - timedelta(days=int(args.since_days))
+
+    if args.since_date is not None:
+        raw = str(args.since_date).strip()
+        raw = raw.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        since_dt = dt.astimezone(timezone.utc)
 
     config_manager = ConfigManager(args.config)
     cfg = config_manager.load(force=True)
@@ -480,6 +506,7 @@ async def main():
                         scan_limit=int(args.scan_limit),
                         max_posts=int(args.max_posts),
                         sleep_between_posts=float(args.sleep_between_posts),
+                        since_dt=since_dt,
                         dry_run=bool(args.dry_run),
                     )
                     print(
