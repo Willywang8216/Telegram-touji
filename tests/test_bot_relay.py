@@ -2,7 +2,7 @@ import unittest
 
 from telethon import types, utils
 
-from bot_relay import RelayBot
+from bot_relay import ExpandedMedia, RelayBot
 
 
 class FakeConfigManager:
@@ -90,6 +90,30 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         await bot.handle(event)
 
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
+
+    async def test_tweet_link_expands_to_media(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        async def fake_expand(original_text):
+            return ExpandedMedia(
+                files=["F1.jpg", "F2.jpg"],
+                cleanup=lambda: None,
+                url="https://x.com/i/web/status/1",
+            )
+
+        bot._maybe_expand_twitter_media = fake_expand
+
+        msg = FakeMessage(message_id=10, media=None, raw_text="https://twitter.com/user/status/1")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [("send_file", -100, ["F1.jpg", "F2.jpg"], msg.raw_text, None)])
 
     async def test_routes_choose_destinations_by_source_chat_id(self):
         client = FakeClient()

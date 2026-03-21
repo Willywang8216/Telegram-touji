@@ -15,8 +15,7 @@
 - 结构化 JSON 日志
 - 限流 + 重试 + 死信（DLQ）
 - 运行时配置热重载（检测 `config.json` 变更）
-- （安全）RelayBot 私聊白名单：只接受白名单用户的私聊消息（默认 `master_account_id`），防止陌生人私聊 bot 直接投递内容
-- （新增）AdminBot（独立 bot token）：用于在 Telegram 里点选「新加入但未配置的来源」并添加 routes/topics
+- **自动展开 Twitter/X 链接**：当消息文本里包含 Tweet 链接时，relaybot 会用 `yt-dlp` 下载图片/视频并以媒体形式发到目标频道/话题（下载失败则回退为普通文本转发）
 
 ---
 
@@ -236,6 +235,21 @@ docker compose run --rm userbot python scripts/autofill_topics.py --daemon --int
 - 默认 `0`：不限制（兼容旧行为）
 - 建议设置为你运行 userbot 的那个用户号 ID，防止别人私聊你的 bot 就能向目标频道群发。
 
+### Twitter/X 链接自动下载（tweet 媒体展开）
+
+当 relaybot 收到的消息文本里包含 Tweet 链接（`twitter.com/.../status/<id>` 或 `x.com/.../status/<id>`）时，会尝试用 `yt-dlp` 下载该 Tweet 的图片/视频，并以媒体形式发到目标频道/话题。
+
+配置项在 `relay` 里：
+
+- `expand_twitter_links`（默认 `true`）：是否启用
+- `twitter_cookies_file`（默认 `null`）：可选。指向一个 cookies 文件路径（Netscape cookiefile 格式），用于在 X 限制访问/需要登录时下载媒体
+- `twitter_max_media_files`（默认 `8`）：最多发送多少个媒体文件（避免一次 tweet 太多图导致发不出去）
+
+环境变量：
+- `RELAY_TWITTER_COOKIES_FILE`：覆盖 `twitter_cookies_file`（Docker/Compose 下建议放到仓库目录，比如 `./twitter.cookies.txt`，然后设置为 `/app/twitter.cookies.txt`）
+
+> 注：某些 X 视频是 HLS 分片格式，需要 `ffmpeg` 才能合并。Docker 镜像已内置 `ffmpeg`。
+
 配置文件：
 - `config.json`：主配置（持久化）
 - `.env`：环境覆盖（敏感信息建议优先放这里）
@@ -255,6 +269,7 @@ docker compose run --rm userbot python scripts/autofill_topics.py --daemon --int
 - `structured_logger.py`：JSON 日志输出
 - `delivery.py`：限流、重试、DLQ
 - `command_utils.py`：命令解析工具
+- `twitter_expand.py`：Tweet URL 提取 + yt-dlp 下载封装
 - `scripts/install.sh`：交互式一键安装脚本
 - `tests/`：最小单元测试
 
@@ -263,10 +278,7 @@ docker compose run --rm userbot python scripts/autofill_topics.py --daemon --int
 ## 🧪 本地验证（Docker 环境）
 
 ```bash
-# 跑单元测试
-docker compose run --rm userbot python -m unittest discover -s tests -v
-
-# 语法检查（py_compile）
-docker compose run --rm userbot python -m py_compile telegram_bot.py bot_relay.py admin_bot.py common_config.py structured_logger.py delivery.</old_code><new_code># shell 脚本语法检查（本镜像是 python:slim，可能没有 bash；用 bash 官方镜像跑 -n）
-docker run --rm -v "$PWD":/app -w /app bash:5 bash -n scripts/install.sh
+python -m unittest discover -s tests -v
+python -m py_compile telegram_bot.py bot_relay.py common_config.py structured_logger.py delivery.py command_utils.py twitter_expand.py
+bash -n scripts/install.sh
 ```

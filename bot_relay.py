@@ -1,11 +1,17 @@
 import asyncio
 import logging
-from typing import Any
+import re
+import tempfile
+import unicodedata
+from dataclasses import dataclass
+from typing import Any, Callable
 
 from telethon import TelegramClient, events, functions, types, utils
 
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from twitter_expand import download_tweet_media, extract_tweet_urls
+
 try:
     from structured_logger import get_logger, log_event
 except ModuleNotFoundError:  # pragma: no cover
@@ -24,7 +30,44 @@ except ModuleNotFoundError:  # pragma: no cover
     def log_event(logger: logging.Logger, level: int, message: str, **kwargs):
         logger.log(level, message)
 
+
 DLQ_PATH = "logs/relay_dlq.jsonl"
+MEDIA_CAPTION_LIMIT = 1024
+
+_TITLE_WS_RE = re.compile(r"\s+")
+
+
+def normalize_forum_topic_title(value: str) -> str:
+    # Prevent duplicate topic creation caused by Unicode/emoji differences such as:
+    # - "✋" vs "✋️" (variation selector)
+    # - topics created with icon emoji (title without emoji) vs a config title prefixed with emoji
+    # - different whitespace
+    s = unicodedata.normalize("NFKC", str(value or ""))
+    s = s.replace("\ufe0f", "").replace("\ufe0e", "")
+    s = _TITLE_WS_RE.sub(" ", s).strip()
+
+    # Strip leading emoji/symbol decorations (keeps normal punctuation like '[' intact).
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isspace():
+            i += 1
+            continue
+        cat = unicodedata.category(ch)
+        if cat in {"So", "Sk", "Cf"}:
+            i += 1
+            continue
+        break
+    s = s[i:].lstrip()
+
+    return s.casefold()
+
+
+@dataclass
+class ExpandedMedia:
+    files: list[Any]
+    cleanup: Callable[[], None]
+    url: str
 
 
 async def _maybe_await(value):
@@ -59,76 +102,153 @@ def _extract_forward_source_chat_id(msg) -> int | None:
 
 
 class ForumTopicResolver:
-    def __init__(self, client: TelegramClient, logger):
+    def __init__(self, client: TelegramClient, logger, *, settings_getter: Callable[[], dict[str, Any]] | None = None):
         self.client = client
         self.logger = logger
-        self._cache: dict[int, dict[str, int]] = {}
+        self._settings_getter = settings_getter or (lambda: {})
+
+        # Cache: chat_id -> normalized_title -> {topic_id, top_message}
+        self._cache: dict[int, dict[str, dict[str, int]]] = {}
+
+    def _allow_creation(self) -> bool:
+        return bool((self._settings_getter() or {}).get("allow_topic_creation", True))
 
     async def get_or_create_top_message_id(self, chat_id: int, title: str) -> int | None:
-        chat_cache = self._cache.setdefault(chat_id, {})
-        if title in chat_cache:
-            return chat_cache[title]
+        key = normalize_forum_topic_title(title)
+        chat_cache = self._cache.setdefault(int(chat_id), {})
+        if key in chat_cache:
+            return int(chat_cache[key]["top_message"])
 
-        topic = await self.find_topic(chat_id, title)
+        topic = await self.find_topic(int(chat_id), title)
         if topic is None:
-            await self._create_topic(chat_id, title)
-            topic = await self.find_topic(chat_id, title)
+            if not self._allow_creation():
+                log_event(self.logger, logging.INFO, "forum_topic_missing_create_disabled", chat_id=int(chat_id), title=str(title))
+                return None
 
-        top = int(topic["top_message"]) if topic else None
-        if top is not None:
-            chat_cache[title] = top
-        return top
+            await self._create_topic(int(chat_id), str(title))
+            topic = await self.find_topic(int(chat_id), title)
+
+        if topic is not None:
+            chat_cache[key] = topic
+            return int(topic["top_message"])
+
+        return None
 
     async def clear_cache(self, chat_id: int) -> None:
         self._cache.pop(int(chat_id), None)
 
-    async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
-        try:
-            peer = await self.client.get_input_entity(chat_id)
+    def _pick_best_topic(self, matches: list[Any], *, chat_id: int, title: str) -> Any | None:
+        if not matches:
+            return None
+
+        if len(matches) > 1:
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topic_duplicates_detected",
+                chat_id=int(chat_id),
+                title=str(title),
+                duplicates=[{"id": int(getattr(t, "id", 0) or 0), "top_message": int(getattr(t, "top_message", 0) or 0), "hidden": bool(getattr(t, "hidden", False)), "pinned": bool(getattr(t, "pinned", False))} for t in matches],
+            )
+
+        # Prefer visible + pinned + most active.
+        matches.sort(
+            key=lambda t: (
+                bool(getattr(t, "hidden", False)),
+                not bool(getattr(t, "pinned", False)),
+                -int(getattr(t, "top_message", 0) or 0),
+                int(getattr(t, "id", 0) or 0),
+            )
+        )
+        return matches[0]
+
+    async def _collect_matching_topics(self, peer, *, title: str, q: str | None, max_pages: int) -> list[Any]:
+        needle = normalize_forum_topic_title(title)
+        matches: list[Any] = []
+
+        offset_topic = 0
+        offset_id = 0
+        for _ in range(max_pages):
             res = await self.client(
                 functions.messages.GetForumTopicsRequest(
                     peer=peer,
-                    q=title,
+                    q=q,
                     offset_date=0,
-                    offset_id=0,
-                    offset_topic=0,
+                    offset_id=int(offset_id),
+                    offset_topic=int(offset_topic),
                     limit=100,
                 )
             )
-            for t in getattr(res, "topics", []) or []:
-                if getattr(t, "title", None) == title:
-                    topic_id = int(getattr(t, "id", 0) or 0)
-                    top_message = int(getattr(t, "top_message", 0) or 0)
-                    if topic_id and top_message:
-                        return {"topic_id": topic_id, "top_message": top_message}
+            topics = list(getattr(res, "topics", []) or [])
+            if not topics:
+                break
+
+            for t in topics:
+                t_title = getattr(t, "title", None)
+                if t_title is None:
+                    continue
+                if normalize_forum_topic_title(str(t_title)) == needle:
+                    matches.append(t)
+
+            last = topics[-1]
+            next_offset_topic = int(getattr(last, "id", 0) or 0)
+            next_offset_id = int(getattr(last, "top_message", 0) or 0)
+            if (next_offset_topic, next_offset_id) == (offset_topic, offset_id):
+                break
+            offset_topic, offset_id = next_offset_topic, next_offset_id
+
+        return matches
+
+    async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
+        try:
+            peer = await self.client.get_input_entity(int(chat_id))
+
+            # First try with Telegram server-side search.
+            matches = await self._collect_matching_topics(peer, title=str(title), q=str(title), max_pages=5)
+            if not matches:
+                # Fallback: full scan (handles cases where q doesn't match emoji/VS16/etc).
+                matches = await self._collect_matching_topics(peer, title=str(title), q="", max_pages=20)
+
+            best = self._pick_best_topic(matches, chat_id=int(chat_id), title=str(title))
+            if best is None:
+                return None
+
+            topic_id = int(getattr(best, "id", 0) or 0)
+            top_message = int(getattr(best, "top_message", 0) or 0)
+            if topic_id and top_message:
+                return {"topic_id": topic_id, "top_message": top_message}
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
                 logging.INFO,
                 "forum_topics_list_failed",
-                chat_id=chat_id,
-                title=title,
+                chat_id=int(chat_id),
+                title=str(title),
                 error=f"{type(exc).__name__}: {exc}",
             )
         return None
 
     async def _create_topic(self, chat_id: int, title: str) -> None:
+        if not self._allow_creation():
+            log_event(self.logger, logging.INFO, "forum_topic_create_disabled", chat_id=int(chat_id), title=str(title))
+            return
+
         try:
-            peer = await self.client.get_input_entity(chat_id)
+            peer = await self.client.get_input_entity(int(chat_id))
             await self.client(
                 functions.messages.CreateForumTopicRequest(
                     peer=peer,
-                    title=title,
+                    title=str(title),
                 )
             )
-            log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=chat_id, title=title)
+            log_event(self.logger, logging.INFO, "forum_topic_created", chat_id=int(chat_id), title=str(title))
         except Exception as exc:  # noqa: BLE001
             log_event(
                 self.logger,
                 logging.INFO,
                 "forum_topic_create_failed",
-                chat_id=chat_id,
-                title=title,
+                chat_id=int(chat_id),
+                title=str(title),
                 error=f"{type(exc).__name__}: {exc}",
             )
 
@@ -140,6 +260,7 @@ class RelayBot:
         config_manager: ConfigManager,
         settings: dict[str, Any],
         *,
+        tweet_resolver=None,
         rate_limiter: AsyncRateLimiter | None = None,
         dlq_path: str = DLQ_PATH,
         logger=None,
@@ -147,10 +268,11 @@ class RelayBot:
         self.client = client
         self.config_manager = config_manager
         self.settings = settings
+        self.tweet_resolver = tweet_resolver
         self.rate_limiter = rate_limiter or AsyncRateLimiter(rate_per_sec=8)
         self.dlq_path = dlq_path
         self.logger = logger or get_logger("relaybot")
-        self.topic_resolver = ForumTopicResolver(client, self.logger)
+        self.topic_resolver = ForumTopicResolver(client, self.logger, settings_getter=self.current_settings)
 
         # Keyed by (chat_id, grouped_id) to avoid collisions across different private senders.
         self.media_group_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -203,7 +325,12 @@ class RelayBot:
     async def sync_forum_topics(self) -> None:
         settings = self.current_settings()
 
+        if not settings.get("manage_forum_topics", True):
+            log_event(self.logger, logging.INFO, "forum_topic_management_disabled")
+            return
+
         required: dict[int, set[str]] = {}
+}
 
         def add(chat_id: int, title: str | None) -> None:
             if not title:
@@ -312,9 +439,12 @@ class RelayBot:
                         error=f"{type(exc).__name__}: {exc}",
                     )
 
-        for chat_id, titles in required.items():
-            for title in sorted(titles):
-                await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(title))
+        if settings.get("allow_topic_creation", True):
+            for chat_id, titles in required.items():
+                for title in sorted(titles):
+                    await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(title))
+        else:
+            log_event(self.logger, logging.INFO, "forum_topic_creation_disabled_skip_sync")
 
     def _post_caption_for(self, chat_id: int) -> str | None:
         captions = self.current_settings().get("post_captions", {}) or {}
@@ -325,6 +455,53 @@ class RelayBot:
             if s and s in text:
                 return True
         return False
+
+    async def _maybe_expand_twitter_media(self, original_text: str) -> ExpandedMedia | None:
+        settings = self.current_settings()
+        if not settings.get("expand_twitter_links", True):
+            return None
+
+        tweet_urls = extract_tweet_urls(original_text)
+        if not tweet_urls:
+            return None
+
+        url = tweet_urls[0]
+        tmp = tempfile.TemporaryDirectory(prefix="relaybot_tweet_")
+
+        cookies_file = settings.get("twitter_cookies_file")
+        max_files = int(settings.get("twitter_max_media_files", 8) or 8)
+
+        try:
+            if self.tweet_resolver is not None:
+                resolved = await _maybe_await(self.tweet_resolver.resolve(url))
+                if resolved:
+                    return ExpandedMedia(files=list(resolved), cleanup=tmp.cleanup, url=url)
+                tmp.cleanup()
+                return None
+
+            files = await asyncio.to_thread(
+                download_tweet_media,
+                url,
+                tmp.name,
+                cookies_file=cookies_file,
+                max_files=max_files,
+                logger=self.logger,
+            )
+            if not files:
+                tmp.cleanup()
+                return None
+
+            return ExpandedMedia(files=[str(p) for p in files], cleanup=tmp.cleanup, url=url)
+        except Exception as exc:  # noqa: BLE001
+            tmp.cleanup()
+            log_event(
+                self.logger,
+                logging.INFO,
+                "tweet_media_download_failed",
+                url=url,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return None
 
     async def handle(self, event) -> None:
         settings = self.current_settings()
@@ -422,7 +599,7 @@ class RelayBot:
                 await self.rate_limiter.wait()
                 try:
                     await with_retry(
-                        lambda: self.client.send_file(chat_id, files, caption=full_caption, reply_to=reply_to),
+                        lambda: self.client.send_file(chat_id, files, caption=self._trim_caption(full_caption), reply_to=reply_to),
                         retries=3,
                         base_delay=1,
                         logger=self.logger,
@@ -450,76 +627,109 @@ class RelayBot:
         except asyncio.CancelledError:
             return
 
+    def _trim_caption(self, text: str | None) -> str | None:
+        if not text:
+            return None
+        s = str(text)
+        if len(s) <= MEDIA_CAPTION_LIMIT:
+            return s
+        return s[: MEDIA_CAPTION_LIMIT - 1] + "…"
+
     async def send_copy(self, msg) -> None:
         source_chat_id = _extract_forward_source_chat_id(msg)
-        text = getattr(msg, "raw_text", "") or ""
+        original_text = getattr(msg, "raw_text", "") or ""
 
+        # We use the original text for tweet URL detection even if strip_text is enabled.
+        display_text = original_text
         if self.current_settings().get("strip_text"):
-            text = ""
+            display_text = ""
 
-        for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
-            chat_id = int(dest["chat_id"])
-            topic_title = dest.get("topic_title")
+        media = getattr(msg, "media", None)
+        uploadable_media = media is not None and not isinstance(media, types.MessageMediaWebPage)
 
-            post_caption = self._post_caption_for(chat_id)
-            full_text = text
-            if post_caption:
-                full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
+        expanded: ExpandedMedia | None = None
+        if not uploadable_media:
+            expanded = await self._maybe_expand_twitter_media(original_text)
 
-            if full_text and self._is_blocked(full_text):
-                log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
-                continue
+        try:
+            for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
+                chat_id = int(dest["chat_id"])
+                topic_title = dest.get("topic_title")
 
-            reply_to = None
-            if topic_title:
-                reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+                post_caption = self._post_caption_for(chat_id)
+                full_text = display_text
+                if post_caption:
+                    full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
 
-            if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
-                fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
-                if fallback:
-                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
-
-            await self.rate_limiter.wait()
-            try:
-                if getattr(msg, "media", None):
-                    await with_retry(
-                        lambda: self.client.send_file(chat_id, msg.media, caption=(full_text or None), reply_to=reply_to),
-                        retries=3,
-                        base_delay=1,
-                        logger=self.logger,
-                        action="send_message",
-                    )
-                elif full_text:
-                    await with_retry(
-                        lambda: self.client.send_message(chat_id, message=full_text, reply_to=reply_to),
-                        retries=3,
-                        base_delay=1,
-                        logger=self.logger,
-                        action="send_message",
-                    )
-                else:
-                    log_event(self.logger, logging.INFO, "message_skipped", chat_id=chat_id, message_id=msg.id)
+                if full_text and self._is_blocked(full_text):
+                    log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
 
-                log_event(
-                    self.logger,
-                    logging.INFO,
-                    "message_sent",
-                    chat_id=chat_id,
-                    topic_title=str(topic_title) if topic_title else None,
-                    message_id=msg.id,
-                    source_chat_id=source_chat_id,
-                )
-            except Exception as exc:  # noqa: BLE001
-                payload = {
-                    "chat_id": chat_id,
-                    "topic_title": str(topic_title) if topic_title else None,
-                    "message_id": msg.id,
-                    "source_chat_id": source_chat_id,
-                    "error": str(exc),
-                }
-                write_dlq(self.dlq_path, payload)
-                log_event(self.logger, logging.ERROR, "message_send_failed", **payload)
+                reply_to = None
+                if topic_title:
+                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+
+                if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
+                    fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
+                    if fallback:
+                        reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+
+                await self.rate_limiter.wait()
+                try:
+                    if uploadable_media:
+                        await with_retry(
+                            lambda: self.client.send_file(chat_id, media, caption=self._trim_caption(full_text), reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_message",
+                        )
+                    elif expanded is not None:
+                        await with_retry(
+                            lambda: self.client.send_file(chat_id, expanded.files, caption=self._trim_caption(full_text), reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_tweet_media",
+                        )
+                        log_event(self.logger, logging.INFO, "tweet_media_sent", chat_id=chat_id, url=expanded.url)
+                    elif full_text:
+                        await with_retry(
+                            lambda: self.client.send_message(chat_id, message=full_text, reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_message",
+                        )
+                    else:
+                        log_event(self.logger, logging.INFO, "message_skipped", chat_id=chat_id, message_id=msg.id)
+                        continue
+
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "message_sent",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title) if topic_title else None,
+                        message_id=msg.id,
+                        source_chat_id=source_chat_id,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    payload = {
+                        "chat_id": chat_id,
+                        "topic_title": str(topic_title) if topic_title else None,
+                        "message_id": msg.id,
+                        "source_chat_id": source_chat_id,
+                        "error": str(exc),
+                    }
+                    write_dlq(self.dlq_path, payload)
+                    log_event(self.logger, logging.ERROR, "message_send_failed", **payload)
+        finally:
+            if expanded is not None:
+                try:
+                    expanded.cleanup()
+                except Exception:  # noqa: BLE001
+                    pass
 
 
 async def start_relay_client(settings: dict[str, Any], logger) -> TelegramClient:
@@ -568,7 +778,10 @@ async def main() -> None:
     client = await start_relay_client(settings, logger)
     bot = RelayBot(client, config_manager, settings, logger=logger)
 
-    await bot.sync_forum_topics()
+    if settings.get("manage_forum_topics", True):
+        await bot.sync_forum_topics()
+    else:
+        log_event(logger, logging.INFO, "forum_topic_management_disabled")
 
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def handler(event):

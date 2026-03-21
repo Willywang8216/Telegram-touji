@@ -12,7 +12,9 @@ class TestSyntax(unittest.TestCase):
             Path("command_utils.py"),
             Path("delivery.py"),
             Path("structured_logger.py"),
+            Path("twitter_expansion.py"),
             Path("scripts/sync_forum_topics.py"),
+            Path("scripts/dedupe_forum_topics.py"),
         ]
         for p in files:
             with self.subTest(file=str(p)):

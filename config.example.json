@@ -15,6 +15,14 @@
     "dest_channels": [-1009876543210],
     "master_account_id": 0,
 
+    "post_captions": {
+      "-1009876543210": "Powered by relaybot"
+    },
+
+    "expand_twitter_links": true,
+    "twitter_cookies_file": null,
+    "twitter_max_media_files": 8,
+
     "routes": [
       {
         "source_chats": [-1001234567890],
@@ -23,6 +31,9 @@
     ],
 
     "default_destinations": [{"chat_id": -1009876543210, "topic_title": "Default"}],
+
+    "manage_forum_topics": true,
+    "allow_topic_creation": true,
 
     "distribute_unrouted_to_buckets": false,
     "unrouted_distribution_mode": "source",

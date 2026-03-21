@@ -1,2 +1,3 @@
-telethon==1.42.0
+telethon
 pysocks
+yt-dlp
