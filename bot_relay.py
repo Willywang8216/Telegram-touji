@@ -34,6 +34,10 @@ except ModuleNotFoundError:  # pragma: no cover
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 
+SRC_MARKER_PREFIX = "[[SRC:"
+SRC_MARKER_SUFFIX = "]]"
+SRC_MARKER_RE = re.compile(r"\[\[SRC:(-?\d+)\]\]")
+
 _TITLE_WS_RE = re.compile(r"\s+")
 
 
@@ -79,26 +83,50 @@ forum_topics_lock = asyncio.Lock()
 forum_topics_cache: dict[int, dict[str, int]] = {}
 topic_api_disabled_chats: set[int] = set()
 
-def _extract_forward_source_chat_id(msg) -> int | None:
-    fwd = getattr(msg, "fwd_from", None) or getattr(msg, "forward", None)
-    if not fwd:
+def _extract_src_marker(text: str) -> int | None:
+    if not text:
+        return None
+    m = SRC_MARKER_RE.search(str(text))
+    if not m:
+        return None
+    try:
+        return int(m.group(1))
+    except Exception:  # noqa: BLE001
         return None
 
-    from_id = getattr(fwd, "from_id", None)
-    if from_id is not None:
+
+def _strip_src_marker(text: str) -> str:
+    if not text:
+        return ""
+    out = SRC_MARKER_RE.sub("", str(text), count=1)
+    return out.strip()
+
+
+def _extract_forward_source_chat_id(msg) -> int | None:
+    fwd = getattr(msg, "fwd_from", None)
+    if fwd:
         try:
-            return utils.get_peer_id(from_id)
+            from_id = getattr(fwd, "from_id", None)
+            if isinstance(from_id, types.PeerChannel):
+                return int(from_id.channel_id)
+            if isinstance(from_id, types.PeerChat):
+                return int(from_id.chat_id)
+            if isinstance(from_id, types.PeerUser):
+                return int(from_id.user_id)
+
+            saved = getattr(fwd, "saved_from_peer", None)
+            if isinstance(saved, types.PeerChannel):
+                return int(saved.channel_id)
+            if isinstance(saved, types.PeerChat):
+                return int(saved.chat_id)
+            if isinstance(saved, types.PeerUser):
+                return int(saved.user_id)
         except Exception:  # noqa: BLE001
             pass
 
-    channel_id = getattr(fwd, "channel_id", None)
-    if channel_id is not None:
-        try:
-            return utils.get_peer_id(types.PeerChannel(int(channel_id)))
-        except Exception:  # noqa: BLE001
-            pass
-
-    return None
+    # Fallback: for "no-forwards" sources where the userbot has to re-upload media,
+    # we embed the source chat id as a marker in the caption.
+    return _extract_src_marker(getattr(msg, "raw_text", None) or getattr(msg, "message", None) or "")
 
 
 class ForumTopicResolver:
@@ -563,6 +591,8 @@ class RelayBot:
                 ),
                 None,
             )
+            if caption:
+                caption = _strip_src_marker(str(caption))
             files = [m.media for m in msgs if getattr(m, "media", None)]
             _, gid = key
 
@@ -594,6 +624,18 @@ class RelayBot:
                     fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
                     if fallback:
                         reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+
+                if topic_title and reply_to is None:
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "album_skipped_topic_not_found",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title),
+                        group_id=gid,
+                        source_chat_id=source_chat_id,
+                    )
+                    continue
 
                 await self.rate_limiter.wait()
                 try:
@@ -636,7 +678,7 @@ class RelayBot:
 
     async def send_copy(self, msg) -> None:
         source_chat_id = _extract_forward_source_chat_id(msg)
-        original_text = getattr(msg, "raw_text", "") or ""
+        original_text = _strip_src_marker(getattr(msg, "raw_text", "") or "")
 
         # We use the original text for tweet URL detection even if strip_text is enabled.
         display_text = original_text
@@ -672,6 +714,18 @@ class RelayBot:
                     fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
                     if fallback:
                         reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+
+                if topic_title and reply_to is None:
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "message_skipped_topic_not_found",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title),
+                        message_id=msg.id,
+                        source_chat_id=source_chat_id,
+                    )
+                    continue
 
                 await self.rate_limiter.wait()
                 try:

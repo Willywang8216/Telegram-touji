@@ -91,8 +91,8 @@
     "twitter_cookies_file": null,
     "twitter_max_media_files": 8,
 
-    "manage_forum_topics": true,
-    "allow_topic_creation": true,
+    "manage_forum_topics": false,
+    "allow_topic_creation": false,
 
     "default_destinations": [
       {"chat_id": -1002349398833, "topic_title": "🔥 今日爆熱"},
@@ -182,43 +182,6 @@
         "destinations": [
           {"chat_id": -1002349398833, "topic_title": "🐻 大號熊熊"},
           {"chat_id": -1002350290734, "topic_title": "🎯 Hidden Gems"}
-        ]
-      }
-    ],
-
-    "ensure_forum_topics": [
-      {
-        "chat_id": -1002349398833,
-        "topics": [
-          "🔥 今日爆熱",
-          "👀 戶外野裸露出",
-          "⛓️ 主奴調教",
-          "💪 肌肉×鮮肉",
-          "🧜 偽娘南娘瑟瑟",
-          "✋ 不乖打屁屁",
-          "📱 抖音裸舞",
-          "🍑 翹臀精選",
-          "🌍 歐美GAY",
-          "📼 復古男同志片",
-          "🇯🇵 日本GV",
-          "🐻 大號熊熊",
-          "🎯 冷門寶藏"
-        ]
-      },
-      {
-        "chat_id": -1002350290734,
-        "topics": [
-          "🔥 Hot Right Now",
-          "👀 Gay Exhibitionism/Voyeur",
-          "⛓️ BDSM & Power",
-          "💪 Jocks & Twinks",
-          "🧜 Asian Ladyboy",
-          "✋ Spank Fetish",
-          "🔒 Gay Chastity",
-          "🍑 Booty Highlights",
-          "📼 Retro gay porn",
-          "🇯🇵 Professional Japan Porn",
-          "🎯 Hidden Gems"
         ]
       }
     ]

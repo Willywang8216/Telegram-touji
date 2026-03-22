@@ -84,7 +84,13 @@ def _topic_title_variants(title: str) -> list[str]:
     return out
 
 
-async def _resolve_or_create_topic(client: TelegramClient, chat_id: int, title: str) -> tuple[int, int]:
+async def _resolve_or_create_topic(
+    client: TelegramClient,
+    chat_id: int,
+    title: str,
+    *,
+    create: bool,
+) -> tuple[int, int] | None:
     entity = await client.get_entity(chat_id)
 
     for q in _topic_title_variants(title):
@@ -101,6 +107,9 @@ async def _resolve_or_create_topic(client: TelegramClient, chat_id: int, title: 
         for t in list(res.topics):
             if t.title == title or t.title == str(q):
                 return int(t.id), int(t.top_message)
+
+    if not create:
+        return None
 
     await client(functions.messages.CreateForumTopicRequest(peer=entity, title=str(title), icon_color=0x6FB9F0))
 
@@ -334,9 +343,15 @@ async def backfill_one_destination(
     max_posts: int,
     sleep_between_posts: float,
     since_dt: datetime | None,
+    create_topics: bool,
     dry_run: bool,
 ) -> int:
-    dest_topic_id, dest_top_message = await _resolve_or_create_topic(client, dest.chat_id, dest.topic_title)
+    topic = await _resolve_or_create_topic(client, dest.chat_id, dest.topic_title, create=bool(create_topics))
+    if not topic:
+        print(f"SKIP: destination topic not found (create disabled): dest_chat_id={dest.chat_id} title={dest.topic_title!r}")
+        return 0
+
+    dest_topic_id, dest_top_message = topic
 
     posted = 0
 
@@ -423,12 +438,17 @@ async def main():
     parser.add_argument("--since-days", type=int, help="Only backfill messages newer than N days ago (e.g. 90)")
     parser.add_argument("--since-date", help="Only backfill messages newer than this date/time (ISO, e.g. 2026-01-01 or 2026-01-01T12:00:00Z)")
 
+    parser.add_argument("--create-topics", action="store_true", help="Create missing destination topics (overrides config)")
+    parser.add_argument("--no-create-topics", action="store_true", help="Do not create destination topics if missing (overrides config)")
+
     parser.add_argument("--scan-limit", type=int, default=2000, help="How many recent source messages to scan")
     parser.add_argument("--max-posts", type=int, default=10, help="Max posts to send per destination")
     parser.add_argument("--sleep-between-posts", type=float, default=1.0, help="Delay between posts")
     parser.add_argument("--dry-run", action="store_true", help="Do not send anything, only print what would be sent")
 
     args = parser.parse_args()
+
+    relay_create_topics_default = True
 
     since_dt: datetime | None = None
     if args.since_days is not None and args.since_date is not None:
@@ -449,9 +469,20 @@ async def main():
     cfg = config_manager.load(force=True)
 
     relay_cfg = cfg.get("relay") or {}
+    relay_create_topics_default = bool(relay_cfg.get("allow_topic_creation", True))
+
     routes = relay_cfg.get("routes") or []
     if not routes:
         raise SystemExit("relay.routes is empty")
+
+    if bool(args.create_topics) and bool(args.no_create_topics):
+        raise SystemExit("Use only one of --create-topics or --no-create-topics")
+
+    create_topics = relay_create_topics_default
+    if bool(args.create_topics):
+        create_topics = True
+    elif bool(args.no_create_topics):
+        create_topics = False
 
     only_sources = [int(x) for x in (args.source_chat_id or [])]
     only_dests = [int(x) for x in (args.dest_chat_id or [])]
@@ -507,6 +538,7 @@ async def main():
                         max_posts=int(args.max_posts),
                         sleep_between_posts=float(args.sleep_between_posts),
                         since_dt=since_dt,
+                        create_topics=bool(create_topics),
                         dry_run=bool(args.dry_run),
                     )
                     print(
