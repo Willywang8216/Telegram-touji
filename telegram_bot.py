@@ -14,6 +14,7 @@ from telethon_spam import group_looks_like_promo_directory, message_looks_like_p
 from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+
 try:
     from structured_logger import get_logger, log_event
 except ModuleNotFoundError:  # pragma: no cover
@@ -32,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover
     def log_event(logger: logging.Logger, level: int, message: str, **kwargs):
         logger.log(level, message)
 
+
 logger = get_logger("userbot")
 config_manager = ConfigManager()
 settings = load_userbot_settings(config_manager)
@@ -41,7 +43,7 @@ media_group_cache: dict[tuple[int, int], dict] = {}
 media_group_lock = asyncio.Lock()
 
 client = TelegramClient("anon", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
-forwarding_map = {}
+forwarding_map: dict[int, dict] = {}
 bot_mappings = settings["bot_mappings"]
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
@@ -88,7 +90,7 @@ async def rebuild_forwarding_map():
                 continue
 
             peer_id = client.get_peer_id(source_entity)
-            forwarding_map[peer_id] = target_entity
+            forwarding_map[int(peer_id)] = {"target_bot": target_entity, "noforwards": bool(mapping.get("noforwards"))}
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
@@ -166,6 +168,25 @@ async def _copy_single_to_bot(target_bot, message_id: int, chat_id: int, force_r
             logger=logger,
             action="copy_single_send_message",
         )
+
+
+async def _copy_group_to_bot(target_bot, message_ids: list[int], chat_id: int) -> None:
+    msgs = await client.get_messages(int(chat_id), ids=[int(x) for x in message_ids])
+
+    if msgs is None:
+        msg_list: list = []
+    elif isinstance(msgs, list):
+        msg_list = [m for m in msgs if m]
+    else:
+        msg_list = [msgs]
+
+    caption = _src_marker(int(chat_id))
+    first_text = next((getattr(m, "message", None) for m in msg_list if getattr(m, "message", None)), None)
+    if first_text:
+        caption = f"{caption} {first_text}"
+
+    await rate_limiter.wait()
+    await _reupload_group_to_bot(target_bot, msg_list, caption)
 
 
 async def safe_forward_single(target_bot, message_id, chat_id, noforwards: bool = False):
@@ -259,13 +280,13 @@ async def handler(event):
             async with media_group_lock:
                 key = (event.chat_id, event.message.grouped_id)
                 if key not in media_group_cache:
-                    media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot}
+                    media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot, "noforwards": noforwards}
                 media_group_cache[key]["messages"].append(event.message.id)
                 if media_group_cache[key]["task"]:
                     media_group_cache[key]["task"].cancel()
                 media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
         else:
-            await safe_forward_single(target_bot, event.message.id, event.chat_id)
+            await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards)
 
 
 async def process_media_group(key: tuple[int, int]):
@@ -279,6 +300,16 @@ async def process_media_group(key: tuple[int, int]):
         # Remove first so we never double-send even if forwarding throws.
         del media_group_cache[key]
 
+    if data.get("noforwards"):
+        try:
+            await _copy_group_to_bot(data["target_bot"], data["messages"], int(from_peer))
+            log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(data["messages"]), method="reupload")
+        except Exception as exc:  # noqa: BLE001
+            payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
+            write_dlq(DLQ_PATH, payload)
+            log_event(logger, logging.ERROR, "group_copy_failed", **payload)
+        return
+
     try:
         await rate_limiter.wait()
         await with_retry(
@@ -290,6 +321,21 @@ async def process_media_group(key: tuple[int, int]):
         )
         log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(data["messages"]))
     except Exception as exc:  # noqa: BLE001
+        if _is_invalid_message_error(exc):
+            log_event(logger, logging.WARNING, "group_skipped_invalid", group_id=grouped_id, error=str(exc))
+            return
+
+        if _is_protected_forward_error(exc):
+            try:
+                await _copy_group_to_bot(data["target_bot"], data["messages"], int(from_peer))
+                log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(data["messages"]), method="fallback")
+                return
+            except Exception as copy_exc:  # noqa: BLE001
+                payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(copy_exc)}
+                write_dlq(DLQ_PATH, payload)
+                log_event(logger, logging.ERROR, "group_copy_failed", **payload)
+                return
+
         payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
         write_dlq(DLQ_PATH, payload)
         log_event(logger, logging.ERROR, "group_forward_failed", **payload)
@@ -334,7 +380,7 @@ async def main():
             sub_parts = args.split(" ", 1)
             if len(sub_parts) == 2:
                 src, bot = sub_parts[0], sub_parts[1].strip()
-                if not bot.startswith("@"):
+                if not bot.startswith("@"): 
                     await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                     return
                 try:

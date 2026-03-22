@@ -562,6 +562,12 @@ class RelayBot:
                 if key not in self.media_group_cache:
                     source_chat_id = _extract_forward_source_chat_id(msg)
                     self.media_group_cache[key] = {"messages": [], "task": None, "source_chat_id": source_chat_id}
+                else:
+                    if self.media_group_cache[key].get("source_chat_id") is None:
+                        source_chat_id = _extract_forward_source_chat_id(msg)
+                        if source_chat_id is not None:
+                            self.media_group_cache[key]["source_chat_id"] = source_chat_id
+
                 self.media_group_cache[key]["messages"].append(msg)
                 task = self.media_group_cache[key].get("task")
                 if task:
