@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import difflib
 import json
 import sys
 import unicodedata
@@ -139,6 +140,43 @@ def _collect_required_titles(cfg: dict) -> dict[int, set[str]]:
     return required
 
 
+def _collect_topic_title_aliases(cfg: dict) -> dict[int, dict[str, str]]:
+    relay = cfg.get("relay", {}) or {}
+    raw = relay.get("topic_title_aliases", {}) or {}
+
+    out: dict[int, dict[str, str]] = defaultdict(dict)
+    if not isinstance(raw, dict):
+        return {}
+
+    for chat_id, mapping in raw.items():
+        try:
+            cid = int(chat_id)
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(mapping, dict):
+            continue
+        for configured_title, actual_title in mapping.items():
+            if not configured_title or not actual_title:
+                continue
+            out[cid][_normalize_title(str(configured_title))] = str(actual_title)
+
+    return dict(out)
+
+
+def _best_title_suggestions(needle: str, choices: list[str], *, limit: int = 5) -> list[str]:
+    n_norm = _normalize_title(needle)
+    scored: list[tuple[float, str]] = []
+    for c in choices:
+        c_norm = _normalize_title(c)
+        if not c_norm:
+            continue
+        score = difflib.SequenceMatcher(None, n_norm, c_norm).ratio()
+        scored.append((float(score), str(c)))
+
+    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    return [c for _, c in scored[: int(limit)]]
+
+
 async def main() -> None:
     p = argparse.ArgumentParser(description="Export forum topic top_message ids into relay.forum_topic_ids")
     p.add_argument("--config", default="config.json", help="Path to config.json (default: config.json)")
@@ -151,6 +189,12 @@ async def main() -> None:
         "--write",
         action="store_true",
         help="Write relay.forum_topic_ids back into config.json (otherwise prints JSON to stdout)",
+    )
+    p.add_argument(
+        "--suggest-limit",
+        type=int,
+        default=5,
+        help="When a configured title is not found, log up to N suggested existing titles (default: 5)",
     )
     args = p.parse_args()
 
@@ -165,6 +209,8 @@ async def main() -> None:
         log_event(logger, 30, "no_required_forum_topics")
         return
 
+    aliases = _collect_topic_title_aliases(cfg)
+
     client = TelegramClient(str(args.session), settings["api_id"], settings["api_hash"])
     await client.start()  # user login
 
@@ -174,24 +220,48 @@ async def main() -> None:
         peer = await client.get_input_entity(int(chat_id))
 
         by_norm: dict[str, list] = defaultdict(list)
+        all_titles: list[str] = []
         async for t in _iter_all_topics(client, peer):
             raw_title = str(getattr(t, "title", "") or "")
+            all_titles.append(raw_title)
             norm = _normalize_title(raw_title)
             if norm:
                 by_norm[norm].append(t)
 
         chat_map: dict[str, int] = {}
+        alias_for_chat = aliases.get(int(chat_id), {})
+
         for title in sorted(wanted_titles):
-            norm = _normalize_title(title)
-            matches = by_norm.get(norm, [])
+            configured_norm = _normalize_title(title)
+            search_title = alias_for_chat.get(configured_norm, str(title))
+            search_norm = _normalize_title(search_title)
+
+            matches = by_norm.get(search_norm, [])
             if not matches:
-                log_event(logger, 30, "forum_topic_not_found", chat_id=int(chat_id), title=str(title))
+                suggestions = _best_title_suggestions(search_title, all_titles, limit=int(args.suggest_limit))
+                log_event(
+                    logger,
+                    30,
+                    "forum_topic_not_found",
+                    chat_id=int(chat_id),
+                    title=str(title),
+                    search_title=str(search_title) if str(search_title) != str(title) else None,
+                    suggestions=suggestions or None,
+                    hint="If this topic exists under a different name, add relay.topic_title_aliases then rerun export.",
+                )
                 continue
 
             best = max(matches, key=_topic_popularity_key)
             top_message = int(getattr(best, "top_message", 0) or 0)
             if not top_message:
-                log_event(logger, 30, "forum_topic_missing_top_message", chat_id=int(chat_id), title=str(title), topic_id=int(getattr(best, "id", 0) or 0))
+                log_event(
+                    logger,
+                    30,
+                    "forum_topic_missing_top_message",
+                    chat_id=int(chat_id),
+                    title=str(title),
+                    topic_id=int(getattr(best, "id", 0) or 0),
+                )
                 continue
 
             chat_map[str(title)] = top_message
@@ -201,7 +271,19 @@ async def main() -> None:
 
     if args.write:
         relay = cfg.get("relay", {}) or {}
-        relay["forum_topic_ids"] = forum_topic_ids_out
+        existing = relay.get("forum_topic_ids", {}) or {}
+        if not isinstance(existing, dict):
+            existing = {}
+
+        for cid, mapping in forum_topic_ids_out.items():
+            prev = existing.get(cid, {})
+            if not isinstance(prev, dict):
+                prev = {}
+            merged = dict(prev)
+            merged.update(mapping)
+            existing[cid] = merged
+
+        relay["forum_topic_ids"] = existing
         cfg["relay"] = relay
         cm.save(cfg)
         log_event(logger, 20, "forum_topic_ids_written", chat_count=len(forum_topic_ids_out))

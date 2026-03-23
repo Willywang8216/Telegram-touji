@@ -34,6 +34,12 @@
 
     "require_forum_topic": false,
 
+    "topic_title_aliases": {
+      "-1009876543210": {
+        "Topic A": "Existing Topic A"
+      }
+    },
+
     "forum_topic_ids": {
       "-1009876543210": {
         "Topic A": 123456,

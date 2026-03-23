@@ -79,6 +79,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
   python scripts/export_forum_topic_ids.py --config config.json --write
   ```
 
+> 如果你目标论坛里的话题“已经存在，但名字跟 config 里写的不一样”，可以在 `relay.topic_title_aliases` 里做别名映射，让脚本用“实际话题名”去查找，但仍把 id 写回到你配置的 `topic_title` 下。
+> 然后再次运行 export 脚本即可。
+> 
+> - 脚本会在 `forum_topic_not_found` 的日志里输出 `suggestions`（相似度最高的现有话题名），方便你填写别名。
+
 2) `destinations[].topic_id` 直接填 top_message id（适合少量手工配置）
 
 > 重要：Telethon/MTProto 下，**bot 账号通常无法调用 `messages.GetForumTopics` 列出/搜索话题**，导致仅凭 `topic_title` 无法解析出 id。
