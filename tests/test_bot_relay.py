@@ -305,6 +305,63 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [])
 
+    async def test_forum_topic_ids_mapping_is_used_for_reply_to(self):
+        client = FakeClient()
+        source_id = utils.get_peer_id(types.PeerChannel(123))
+
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-999],
+                "master_account_id": 0,
+                "routes": [
+                    {
+                        "source_chats": [source_id],
+                        "destinations": [{"chat_id": -100, "topic_title": "TopicA"}],
+                    }
+                ],
+                "forum_topic_ids": {-100: {"topica": 555}},
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        async def should_not_be_called(chat_id, title):
+            raise AssertionError("should not call Telegram when forum_topic_ids has a mapping")
+
+        bot.topic_resolver.get_or_create_top_message_id = should_not_be_called
+
+        msg = FakeMessage(
+            message_id=10,
+            media=None,
+            raw_text="hello",
+            fwd_from=FakeForwardHeader(types.PeerChannel(123)),
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
+
+        await bot.handle(event)
+        self.assertEqual(client.calls, [("send_message", -100, "hello", 555)])
+
+    async def test_media_message_blocked_by_blocklist(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-100],
+                "master_account_id": 0,
+                "strip_text": True,
+                "blocklist_substrings": ["cap"],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap hello")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_unauthorized_sender_blocked_when_enabled(self):
         client = FakeClient()
         bot = RelayBot(

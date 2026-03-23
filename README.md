@@ -66,6 +66,27 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji
 - 默认 `0`：不限制（兼容旧行为）
 - 建议设置为你运行 userbot 的那个用户号 ID，防止别人私聊你的 bot 就能向目标频道群发。
 
+### Forum Topics（频道话题）路由说明（为什么总是发到“General/一般聊天”）
+
+目标频道如果开启了 Forum Topics，要把消息发进某个话题，本质上要 **reply_to 该话题的 top_message id**（也就是 Bot API 里的 `message_thread_id`）。
+
+`bot_relay.py` 支持两种方式获取这个 id：
+
+1) **配置 `relay.forum_topic_ids`（推荐，最稳定）**
+- `forum_topic_ids` 的 value 不是 topic_id，而是 **top_message id**。
+- 生成方式（用“用户号”登录一次即可，不影响 relaybot 仍以 bot 发消息）：
+  ```bash
+  python scripts/export_forum_topic_ids.py --config config.json --write
+  ```
+
+2) `destinations[].topic_id` 直接填 top_message id（适合少量手工配置）
+
+> 重要：Telethon/MTProto 下，**bot 账号通常无法调用 `messages.GetForumTopics` 列出/搜索话题**，导致仅凭 `topic_title` 无法解析出 id。
+> 当 `reply_to=None` 时，Telegram 会把消息发到该 forum 的“General”话题（例如 Chatting&Sharing / 一般聊天🥵殼以澀澀🥵）。
+
+如果你希望“找不到话题就不要发”，请在 `relay` 里开启：
+- `require_forum_topic: true`
+
 ### Twitter/X 链接自动下载（tweet 媒体展开）
 
 当 relaybot 收到的消息文本里包含 Tweet 链接（`twitter.com/.../status/<id>` 或 `x.com/.../status/<id>`）时，会尝试用 `yt-dlp` 下载该 Tweet 的图片/视频，并以媒体形式发到目标频道/话题。

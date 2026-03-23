@@ -234,6 +234,56 @@
     "manage_forum_topics": false,
     "allow_topic_creation": false,
 
+    "require_forum_topic": false,
+
+    "forum_topic_ids": {
+      "-1002350290734": {
+        "Chatting&Sharing": 77830,
+        "🧜 Asian Ladyboy": 77684,
+        "🔥 Hot Right Now": 77683,
+        "🔒 Gay Chastity": 77682,
+        "📼 Retro gay porn": 77681,
+        "💪 Jocks & Twinks": 77680,
+        "👀 Gay Exhibitionism/Voyeur": 77679,
+        "🎯 Hidden Gems": 77678,
+        "🍑 Booty Highlights": 77677,
+        "🇯🇵 Professional Japan Porn": 77676,
+        "✋ Spank Fetish": 77675,
+        "⛓️ BDSM & Power": 77674,
+        "🌙 After Dark": 75014,
+        "🍑 Cool Gay Porn 5": 71959,
+        "🍑 Cool Gay Porn 4": 71961,
+        "🍑 Cool GayPorn 3": 71960,
+        "🍑 Cool Gay Porn 2": 71957,
+        "🍑 Cool Gay Porn 1": 71956,
+        "Default Rout": 31868,
+        "🇹🇼 中文（繁體）": 5692
+      },
+      "-1002349398833": {
+        "聊天打屁（不可以澀澀": 827,
+        "一般聊天🥵殼以澀澀🥵": 80561,
+        "🧜 偽娘南娘瑟瑟": 80381,
+        "🔥 今日爆熱": 80380,
+        "📼 復古男同志片": 80379,
+        "📱 抖音裸舞": 80378,
+        "💪 肌肉×鮮肉": 80377,
+        "👀 戶外野裸露出": 80376,
+        "🐻 大號熊熊": 80375,
+        "🎯 冷門寶藏": 80374,
+        "🍑 翹臀精選": 80373,
+        "🌍 歐美GAY": 80372,
+        "🇯🇵 日本GV": 80371,
+        "✋ 不乖打屁屁": 80370,
+        "⛓️ 主奴調教": 80369,
+        "🥘 大雜燴": 72441,
+        "🍑 分流好看片片3": 49466,
+        "🍑 分流好看片片2": 23075,
+        "🍑 分流好看片片4": 23071,
+        "🍑 分流好看片片5": 23054,
+        "🍑 分流好看片片1": 23024
+      }
+    },
+
     "post_captions": {
       "-1002350290734": "It’s me SexualWill, Sexual Side of Nakedwill. I’m glad for you to be here. See https://contacts.sexualwill.com for more info. Please help share my works\n\nBy the way, I collect and relay cool clips I found online.\n\nP.S. Please help me subscribe to my fansone (free) so I could collaborate with others.\n\nhttps://fansone.co/nakedwei",
       "-1002349398833": "這是光光的色色頻道，歡迎大家來一起色色，未滿十八歲請離開。拜託大家支持轉發分享訂閱：https://contacts.sexualwill.com\n\nP.S. 幫忙光光訂閱我的FANSONE 讓我能跟別人合作~ 拜託\n\nhttps://fansone.co/nakedwei"
@@ -273,6 +323,7 @@
       "德州扑克",
       "德州撲克",
       "娱乐城",
+      "娛樂城",
       "qq",
       "扑克",
       "撲克",
@@ -299,7 +350,7 @@
     "unrouted_distribution_mode": "message",
     "general_topic_buckets": {
       "-1002350290734": ["🔥 Hot Right Now", "💪 Jocks & Twinks", "🍑 Booty Highlights", "🌙 After Dark", "🎯 Hidden Gems"],
-      "-1002349398833": ["🔥 今日爆熱", "💪 肌肉×鮮肉", "🍑 翹臀精選", "🌙 深夜癖好", "🎯 冷門寶藏"]
+      "-1002349398833": ["🔥 今日爆熱", "💪 肌肉×鮮肉", "🍑 翹臀精選", "📱 抖音裸舞", "🎯 冷門寶藏"]
     },
 
     "default_destinations": [
@@ -326,7 +377,7 @@
         "source_chats": [-1002358049067],
         "destinations": [
           {"chat_id": -1002350290734, "topic_title": "🇯🇵 Professional Japan Porn"},
-          {"chat_id": -1002349398833, "topic_title": "🇯🇵 日本專業片"}
+          {"chat_id": -1002349398833, "topic_title": "🇯🇵 日本GV"}
         ]
       },
       {
@@ -448,19 +499,18 @@
           "🔥 今日爆熱",
           "💪 肌肉×鮮肉",
           "🍑 翹臀精選",
-          "🌙 深夜癖好",
+          "📱 抖音裸舞",
           "🎯 冷門寶藏",
           "🐻 大號熊熊",
           "🧜 偽娘南娘瑟瑟",
-          "🇯🇵 日本專業片",
+          "🇯🇵 日本GV",
           "🌍 歐美GAY",
           "📼 復古男同志片",
           "🔒 鎖雞雞",
           "✋ 不乖打屁屁",
           "👀 戶外野裸露出",
           "🏋️ 健身猛男",
-          "⛓️ 主奴調教",
-          "📱 抖音裸舞"
+          "⛓️ 主奴調教"
         ]
       }
     ],
@@ -477,7 +527,7 @@
         "🍑 分流好看片片1": "🔥 今日爆熱",
         "🍑 分流好看片片2": "💪 肌肉×鮮肉",
         "🍑 分流好看片片3": "🍑 翹臀精選",
-        "🍑 分流好看片片4": "🌙 深夜癖好",
+        "🍑 分流好看片片4": "📱 抖音裸舞",
         "🍑 分流好看片片5": "🎯 冷門寶藏"
       }
     },

@@ -119,6 +119,11 @@ class ForumTopicResolver:
         # Cache: chat_id -> normalized_title -> {topic_id, top_message}
         self._cache: dict[int, dict[str, dict[str, int]]] = {}
 
+        # Many forum-topic management APIs are restricted for bot accounts.
+        # If we detect the API is unavailable, stop retrying on every message.
+        self._topics_api_supported: bool | None = None
+        self._logged_topics_api_disabled = False
+
     def _allow_creation(self) -> bool:
         return bool((self._settings_getter() or {}).get("allow_topic_creation", True))
 
@@ -127,6 +132,17 @@ class ForumTopicResolver:
         chat_cache = self._cache.setdefault(int(chat_id), {})
         if key in chat_cache:
             return int(chat_cache[key]["top_message"])
+
+        if self._topics_api_supported is False:
+            if not self._logged_topics_api_disabled:
+                self._logged_topics_api_disabled = True
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "forum_topics_api_unavailable",
+                    hint="This relay is logged in as a bot; resolving forum topics by title is restricted. Populate relay.forum_topic_ids (scripts/export_forum_topic_ids.py) or set destinations[].topic_id.",
+                )
+            return None
 
         topic = await self.find_topic(int(chat_id), title)
         if topic is None:
@@ -209,6 +225,9 @@ class ForumTopicResolver:
         return matches
 
     async def find_topic(self, chat_id: int, title: str) -> dict[str, int] | None:
+        if self._topics_api_supported is False:
+            return None
+
         try:
             peer = await self.client.get_input_entity(int(chat_id))
 
@@ -217,6 +236,8 @@ class ForumTopicResolver:
             if not matches:
                 # Fallback: full scan (handles cases where q doesn't match emoji/VS16/etc).
                 matches = await self._collect_matching_topics(peer, title=str(title), q="", max_pages=20)
+
+            self._topics_api_supported = True
 
             best = self._pick_best_topic(matches, chat_id=int(chat_id), title=str(title))
             if best is None:
@@ -227,13 +248,20 @@ class ForumTopicResolver:
             if topic_id and top_message:
                 return {"topic_id": topic_id, "top_message": top_message}
         except Exception as exc:  # noqa: BLE001
+            err_name = type(exc).__name__
+            err_text = str(exc)
+
+            # Telethon raises BotMethodInvalidError when a method is blocked for bot accounts.
+            if err_name == "BotMethodInvalidError" or "BOT_METHOD_INVALID" in err_text.upper():
+                self._topics_api_supported = False
+
             log_event(
                 self.logger,
                 logging.INFO,
                 "forum_topics_list_failed",
                 chat_id=int(chat_id),
                 title=str(title),
-                error=f"{type(exc).__name__}: {exc}",
+                error=f"{err_name}: {exc}",
             )
         return None
 
@@ -283,6 +311,8 @@ class RelayBot:
         self.logger = logger or get_logger("relaybot")
         self.topic_resolver = ForumTopicResolver(client, self.logger, settings_getter=self.current_settings)
         self._warned_unresolved_topics: set[tuple[int, str]] = set()
+        self._logged_topic_config_warning = False
+        self._maybe_log_topic_config_warning(self.settings)
 
         # Keyed by (chat_id, grouped_id) to avoid collisions across different private senders.
         self.media_group_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -299,7 +329,64 @@ class RelayBot:
                 master_account_id=self.settings.get("master_account_id", 0),
                 routes=len(self.settings.get("routes", []) or []),
             )
+            self._maybe_log_topic_config_warning(self.settings)
         return self.settings
+
+    def _maybe_log_topic_config_warning(self, settings: dict[str, Any]) -> None:
+        if self._logged_topic_config_warning:
+            return
+
+        def has_topic_titles() -> bool:
+            for r in settings.get("routes", []) or []:
+                for d in r.get("destinations", []) or []:
+                    if d.get("topic_title") and d.get("topic_id") is None:
+                        return True
+
+            for d in settings.get("default_destinations", []) or []:
+                if d.get("topic_title") and d.get("topic_id") is None:
+                    return True
+
+            for _, topics in (settings.get("general_topic_buckets") or {}).items():
+                if topics:
+                    return True
+
+            for _, title in (settings.get("fallback_topic_titles") or {}).items():
+                if title:
+                    return True
+
+            for item in settings.get("ensure_forum_topics", []) or []:
+                if item.get("topics"):
+                    return True
+
+            return False
+
+        if not has_topic_titles():
+            return
+
+        if settings.get("forum_topic_ids"):
+            return
+
+        self._logged_topic_config_warning = True
+
+        require = bool(settings.get("require_forum_topic"))
+        allow_create = bool(settings.get("allow_topic_creation", True))
+
+        if not allow_create:
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topic_ids_missing",
+                require_forum_topic=require,
+                hint="Topics are configured via topic_title, but relay.forum_topic_ids is empty and allow_topic_creation=false. Messages will go to the forum's General topic (or be skipped if require_forum_topic=true). Populate relay.forum_topic_ids (scripts/export_forum_topic_ids.py --write) or set destinations[].topic_id.",
+            )
+        else:
+            log_event(
+                self.logger,
+                logging.INFO,
+                "forum_topic_ids_missing",
+                require_forum_topic=require,
+                hint="Topics are configured via topic_title, but relay.forum_topic_ids is empty. Relay will try to resolve topics by title, but this is commonly restricted for bot accounts. Populate relay.forum_topic_ids (scripts/export_forum_topic_ids.py --write) or set destinations[].topic_id for reliable routing.",
+            )
 
     def resolve_destinations(self, source_chat_id: int | None, *, seed: int | None = None) -> list[dict[str, Any]]:
         settings = self.current_settings()
