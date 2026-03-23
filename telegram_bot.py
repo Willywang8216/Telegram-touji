@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import tempfile
 
 from telethon import TelegramClient, utils
@@ -44,6 +45,8 @@ bot_mappings = settings["bot_mappings"]
 blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("blocklist_substrings", []) or []
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
+_MAX_LINKS = 3
+_URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 
 def _is_blocked(text: str) -> bool:
@@ -54,6 +57,16 @@ def _is_blocked(text: str) -> bool:
         if str(s).casefold() in hay:
             return True
     return False
+
+
+def _count_links(text: str | None) -> int:
+    if not text:
+        return 0
+    return len(list(_URL_RE.finditer(str(text))))
+
+
+def _has_too_many_links(text: str | None) -> bool:
+    return _count_links(text) > _MAX_LINKS
 
 # Prefix used when we cannot forward (e.g. protected content / noforwards).
 # Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
@@ -229,7 +242,7 @@ async def handler(event):
                     "blocked": False,
                 }
 
-            if msg_text and _is_blocked(msg_text):
+            if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
                 media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
@@ -237,8 +250,15 @@ async def handler(event):
                 media_group_cache[key]["task"].cancel()
             media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
     else:
-        if msg_text and _is_blocked(msg_text):
-            log_event(logger, logging.INFO, "message_blocked", chat_id=str(event.chat_id), message_id=getattr(event.message, "id", None))
+        if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
+            log_event(
+                logger,
+                logging.INFO,
+                "message_blocked",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+                links=_count_links(msg_text) if _has_too_many_links(msg_text) else None,
+            )
             return
         await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards, msg=event.message)
 
@@ -269,8 +289,8 @@ async def process_media_group(key: tuple[int, int]):
         ),
         "",
     )
-    if caption_check and _is_blocked(caption_check):
-        log_event(logger, logging.INFO, "group_blocked", chat_id=str(from_peer), group_id=grouped_id)
+    if caption_check and (_is_blocked(caption_check) or _has_too_many_links(caption_check)):
+        log_event(logger, logging.INFO, "group_blocked", chat_id=str(from_peer), group_id=grouped_id, links=_count_links(caption_check) if _has_too_many_links(caption_check) else None)
         return
 
     try:

@@ -34,9 +34,12 @@ except ModuleNotFoundError:  # pragma: no cover
 
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
+_MAX_LINKS = 3
 
 _IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+
+_URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 _TITLE_WS_RE = re.compile(r"\s+")
 _EMBEDDED_SOURCE_CHAT_ID_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?")
@@ -580,6 +583,14 @@ class RelayBot:
                 return True
         return False
 
+    def _count_links(self, text: str | None) -> int:
+        if not text:
+            return 0
+        return len(list(_URL_RE.finditer(str(text))))
+
+    def _has_too_many_links(self, text: str | None) -> bool:
+        return self._count_links(text) > _MAX_LINKS
+
     def _is_video_message(self, msg) -> bool:
         return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None) or getattr(msg, "gif", None))
 
@@ -754,10 +765,21 @@ class RelayBot:
             if source_chat_id is None:
                 source_chat_id = embedded_source
 
+            _, gid = key
             caption_for_blocking = caption
 
+            if self._has_too_many_links(caption_for_blocking):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_too_many_links",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                    links=self._count_links(caption_for_blocking),
+                )
+                return
+
             files = [m.media for m in msgs if getattr(m, "media", None)]
-            _, gid = key
 
             if not files:
                 log_event(self.logger, logging.INFO, "album_skipped_no_media", group_id=gid)
@@ -766,7 +788,14 @@ class RelayBot:
             should_relay, reason = self._should_relay_album(msgs)
             if not should_relay:
                 log_event(
-                    self.loggerNone
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_policy",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                    reason=reason,
+                )
+                return
 
             for dest in self.resolve_destinations(source_chat_id, seed=gid):
                 chat_id = int(dest["chat_id"])
@@ -870,6 +899,17 @@ class RelayBot:
 
         media = getattr(msg, "media", None)
         uploadable_media = media is not None and not isinstance(media, types.MessageMediaWebPage)
+
+        if self._has_too_many_links(stripped_original_text):
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_too_many_links",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+                links=self._count_links(stripped_original_text),
+            )
+            return
 
         expanded: ExpandedMedia | None = None
         if not uploadable_media:

@@ -122,6 +122,26 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
 
+    async def test_too_many_links_is_skipped_even_for_video(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(
+            message_id=10,
+            media="MEDIA",
+            raw_text="https://a.com https://b.com https://c.com https://d.com",
+            video="VIDEO",
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_album_two_photos_relays(self):
         client = FakeClient()
         bot = RelayBot(
