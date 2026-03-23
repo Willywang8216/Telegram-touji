@@ -282,6 +282,7 @@ class RelayBot:
         self.dlq_path = dlq_path
         self.logger = logger or get_logger("relaybot")
         self.topic_resolver = ForumTopicResolver(client, self.logger, settings_getter=self.current_settings)
+        self._warned_unresolved_topics: set[tuple[int, str]] = set()
 
         # Keyed by (chat_id, grouped_id) to avoid collisions across different private senders.
         self.media_group_cache: dict[tuple[int, int], dict[str, Any]] = {}
@@ -481,8 +482,11 @@ class RelayBot:
         return captions.get(int(chat_id))
 
     def _is_blocked(self, text: str) -> bool:
+        hay = str(text or "").casefold()
         for s in self.current_settings().get("blocklist_substrings", []) or []:
-            if s and s in text:
+            if not s:
+                continue
+            if str(s).casefold() in hay:
                 return True
         return False
 
@@ -601,6 +605,8 @@ class RelayBot:
             if source_chat_id is None:
                 source_chat_id = embedded_source
 
+            caption_for_blocking = caption
+
             files = [m.media for m in msgs if getattr(m, "media", None)]
             _, gid = key
 
@@ -620,6 +626,10 @@ class RelayBot:
                 if post_caption:
                     full_caption = (full_caption or "") + ("\n\n" if full_caption else "") + post_caption
 
+                if caption_for_blocking and self._is_blocked(caption_for_blocking):
+                    log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, group_id=gid)
+                    continue
+
                 if full_caption and self._is_blocked(full_caption):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, group_id=gid)
                     continue
@@ -631,17 +641,31 @@ class RelayBot:
                     if fallback:
                         reply_to = await self._resolve_reply_to(chat_id, str(fallback))
 
-                if reply_to is None and topic_title and self.current_settings().get("require_forum_topic"):
-                    log_event(
-                        self.logger,
-                        logging.INFO,
-                        "album_skipped_topic_not_found",
-                        chat_id=chat_id,
-                        topic_title=str(topic_title),
-                        group_id=gid,
-                        source_chat_id=source_chat_id,
-                    )
-                    continue
+                if reply_to is None and topic_title:
+                    if self.current_settings().get("require_forum_topic"):
+                        log_event(
+                            self.logger,
+                            logging.INFO,
+                            "album_skipped_topic_not_found",
+                            chat_id=chat_id,
+                            topic_title=str(topic_title),
+                            group_id=gid,
+                            source_chat_id=source_chat_id,
+                        )
+                        continue
+
+                    norm = normalize_forum_topic_title(str(topic_title))
+                    warn_key = (int(chat_id), norm)
+                    if warn_key not in self._warned_unresolved_topics:
+                        self._warned_unresolved_topics.add(warn_key)
+                        log_event(
+                            self.logger,
+                            logging.INFO,
+                            "topic_unresolved_fallback_to_general",
+                            chat_id=chat_id,
+                            topic_title=str(topic_title),
+                            hint="Populate relay.forum_topic_ids (run scripts/export_forum_topic_ids.py) to enable routing into topics.",
+                        )
 
                 await self.rate_limiter.wait()
                 try:
@@ -710,6 +734,10 @@ class RelayBot:
                 if post_caption:
                     full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
 
+                # Block based on original inbound text even if strip_text is enabled.
+                if stripped_original_text and self._is_blocked(stripped_original_text):
+                    log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
+                    continue
                 if full_text and self._is_blocked(full_text):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
@@ -721,17 +749,33 @@ class RelayBot:
                     if fallback:
                         reply_to = await self._resolve_reply_to(chat_id, str(fallback))
 
-                if reply_to is None and topic_title and self.current_settings().get("require_forum_topic"):
-                    log_event(
-                        self.logger,
-                        logging.INFO,
-                        "message_skipped_topic_not_found",
-                        chat_id=chat_id,
-                        topic_title=str(topic_title),
-                        message_id=msg.id,
-                        source_chat_id=source_chat_id,
-                    )
+                if reply_to is None and topic_title:
+                    if self.current_settings().get("require_forum_topic"):
+                        log_event(
+                            self.logger,
+                            logging.INFO,
+                            "message_skipped_topic_not_found",
+                            chat_id=chat_id,
+                            topic_title=str(topic_title),
+                            message_id=msg.id,
+                            source_chat_id=source_chat_id,
+                        )
+                        continue
 
+                    norm = normalize_forum_topic_title(str(topic_title))
+                    warn_key = (int(chat_id), norm)
+                    if warn_key not in self._warned_unresolved_topics:
+                        self._warned_unresolved_topics.add(warn_key)
+                        log_event(
+                            self.logger,
+                            logging.INFO,
+                            "topic_unresolved_fallback_to_general",
+                            chat_id=chat_id,
+                            topic_title=str(topic_title),
+                            hint="Populate relay.forum_topic_ids (run scripts/export_forum_topic_ids.py) to enable routing into topics.",
+                        )
+
+                await self.rate_limiter.wait()
                 try:
                     if uploadable_media:
                         await with_retry(

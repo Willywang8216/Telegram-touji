@@ -259,6 +259,52 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen.get("title"), "T2")
         self.assertEqual(client.calls, [("send_message", -100, "hello", 88)])
 
+    async def test_blocklist_applies_even_when_strip_text_enabled(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-100],
+                "master_account_id": 0,
+                "strip_text": True,
+                "blocklist_substrings": ["hello"],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media=None, raw_text="hello world")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_require_forum_topic_skips_when_unresolved(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-100],
+                "master_account_id": 0,
+                "require_forum_topic": True,
+                "default_destinations": [{"chat_id": -100, "topic_title": "TopicA"}],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        # Avoid hitting Telegram API in tests.
+        async def fake_get_or_create_top_message_id(chat_id, title):
+            return None
+
+        bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
+
+        msg = FakeMessage(message_id=10, media=None, raw_text="hello")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_unauthorized_sender_blocked_when_enabled(self):
         client = FakeClient()
         bot = RelayBot(
