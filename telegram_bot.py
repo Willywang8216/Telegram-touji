@@ -1,7 +1,9 @@
 import asyncio
 import logging
+import tempfile
 
 from telethon import TelegramClient, utils
+from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MessageIdInvalidError
 from telethon.events import NewMessage
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 
@@ -94,19 +96,39 @@ async def rebuild_forwarding_map():
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
 
 
+def _is_invalid_message_error(exc: Exception) -> bool:
+    return isinstance(exc, MessageIdInvalidError)
+
+
 async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
     text = getattr(msg, "raw_text", None) or getattr(msg, "text", None) or ""
     marked_text = _with_source_marker(int(source_chat_id), text)
 
     media = getattr(msg, "media", None)
     if media is not None:
-        await with_retry(
-            lambda: client.send_file(target_bot, media, caption=marked_text),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="copy_single_media",
-        )
+        tmp = tempfile.TemporaryDirectory(prefix="userbot_copy_")
+        try:
+            local_path = await client.download_media(msg, file=tmp.name)
+            if not local_path:
+                # If we can't download, at least send the marked caption/text.
+                await with_retry(
+                    lambda: client.send_message(target_bot, marked_text),
+                    retries=3,
+                    base_delay=1,
+                    logger=logger,
+                    action="copy_single_text_fallback",
+                )
+                return
+
+            await with_retry(
+                lambda: client.send_file(target_bot, local_path, caption=marked_text),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action="copy_single_media",
+            )
+        finally:
+            tmp.cleanup()
     else:
         await with_retry(
             lambda: client.send_message(target_bot, marked_text),
@@ -119,18 +141,42 @@ async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
 
 async def safe_forward_single(target_bot, message_id, chat_id, *, noforwards: bool = False, msg=None):
     await rate_limiter.wait()
-    try:
-        if noforwards and msg is not None:
+
+    if noforwards and msg is not None:
+        try:
             await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id))
-        else:
-            await with_retry(
-                lambda: client.forward_messages(target_bot, message_id, from_peer=chat_id),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="forward_single",
-            )
+            log_event(logger, logging.INFO, "message_copied", chat_id=str(chat_id), message_id=message_id)
+        except Exception as exc:  # noqa: BLE001
+            payload = {"chat_id": chat_id, "message_id": message_id, "error": str(exc)}
+            write_dlq(DLQ_PATH, payload)
+            log_event(logger, logging.ERROR, "message_copy_failed", **payload)
+        return
+
+    try:
+        await with_retry(
+            lambda: client.forward_messages(target_bot, message_id, from_peer=chat_id),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="forward_single",
+        )
         log_event(logger, logging.INFO, "message_forwarded", chat_id=str(chat_id), message_id=message_id)
+    except (ChatForwardsRestrictedError, MessageIdInvalidError) as exc:
+        # Fallback: if forward fails but we have the message, try copy.
+        if msg is not None:
+            try:
+                await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id))
+                log_event(logger, logging.INFO, "message_copied_fallback", chat_id=str(chat_id), message_id=message_id)
+                return
+            except Exception as copy_exc:  # noqa: BLE001
+                payload = {"chat_id": chat_id, "message_id": message_id, "error": str(copy_exc)}
+                write_dlq(DLQ_PATH, payload)
+                log_event(logger, logging.ERROR, "message_copy_failed", **payload)
+                return
+
+        payload = {"chat_id": chat_id, "message_id": message_id, "error": str(exc)}
+        write_dlq(DLQ_PATH, payload)
+        log_event(logger, logging.ERROR, "message_forward_failed", **payload)
     except Exception as exc:  # noqa: BLE001
         payload = {"chat_id": chat_id, "message_id": message_id, "error": str(exc)}
         write_dlq(DLQ_PATH, payload)
@@ -196,16 +242,39 @@ async def process_media_group(key: tuple[int, int]):
                 "",
             )
             caption = _with_source_marker(int(from_peer), caption)
-            files = [m.media for m in msgs if getattr(m, "media", None)]
-            await rate_limiter.wait()
-            await with_retry(
-                lambda: client.send_file(data["target_bot"], files, caption=caption),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="copy_group_media",
-            )
-            log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(msgs))
+
+            tmp = tempfile.TemporaryDirectory(prefix="userbot_copy_group_")
+            try:
+                files: list[str] = []
+                for m in msgs:
+                    if getattr(m, "media", None) is None:
+                        continue
+                    p = await client.download_media(m, file=tmp.name)
+                    if p:
+                        files.append(str(p))
+
+                if not files:
+                    await with_retry(
+                        lambda: client.send_message(data["target_bot"], caption),
+                        retries=3,
+                        base_delay=1,
+                        logger=logger,
+                        action="copy_group_text_fallback",
+                    )
+                    log_event(logger, logging.INFO, "group_copied_text_only", group_id=grouped_id, count=len(msgs))
+                    return
+
+                await rate_limiter.wait()
+                await with_retry(
+                    lambda: client.send_file(data["target_bot"], files, caption=caption),
+                    retries=3,
+                    base_delay=1,
+                    logger=logger,
+                    action="copy_group_media",
+                )
+                log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(msgs))
+            finally:
+                tmp.cleanup()
         else:
             await rate_limiter.wait()
             await with_retry(

@@ -698,7 +698,7 @@ class RelayBot:
 
         expanded: ExpandedMedia | None = None
         if not uploadable_media:
-            expanded = await self._maybe_expand_twitter_media(original_text)
+            expanded = await self._maybe_expand_twitter_media(stripped_original_text)
 
         try:
             for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
