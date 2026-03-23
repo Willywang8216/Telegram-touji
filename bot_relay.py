@@ -319,6 +319,28 @@ class RelayBot:
 
         return [{"chat_id": int(x)} for x in settings.get("dest_channels", [])]
 
+    async def _resolve_reply_to(self, chat_id: int, topic_title: str | None, *, explicit_topic_id: int | None = None) -> int | None:
+        if explicit_topic_id is not None:
+            try:
+                return int(explicit_topic_id)
+            except Exception:  # noqa: BLE001
+                return None
+
+        if not topic_title:
+            return None
+
+        settings = self.current_settings()
+        forum_topic_ids = (settings.get("forum_topic_ids") or {}).get(int(chat_id)) or {}
+        key = normalize_forum_topic_title(str(topic_title))
+        mapped = forum_topic_ids.get(key)
+        if mapped is not None:
+            try:
+                return int(mapped)
+            except Exception:  # noqa: BLE001
+                return None
+
+        return await self.topic_resolver.get_or_create_top_message_id(int(chat_id), str(topic_title))
+
     async def sync_forum_topics(self) -> None:
         settings = self.current_settings()
 
@@ -583,14 +605,24 @@ class RelayBot:
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, group_id=gid)
                     continue
 
-                reply_to = None
-                if topic_title:
-                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+                reply_to = await self._resolve_reply_to(chat_id, topic_title, explicit_topic_id=dest.get("topic_id"))
 
                 if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
                     fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
                     if fallback:
-                        reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+                        reply_to = await self._resolve_reply_to(chat_id, str(fallback))
+
+                if reply_to is None and topic_title and self.current_settings().get("require_forum_topic"):
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "album_skipped_topic_not_found",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title),
+                        group_id=gid,
+                        source_chat_id=source_chat_id,
+                    )
+                    continue
 
                 await self.rate_limiter.wait()
                 try:
@@ -661,16 +693,24 @@ class RelayBot:
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
 
-                reply_to = None
-                if topic_title:
-                    reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(topic_title))
+                reply_to = await self._resolve_reply_to(chat_id, topic_title, explicit_topic_id=dest.get("topic_id"))
 
                 if reply_to is None and self.current_settings().get("fallback_to_general_topic"):
                     fallback = (self.current_settings().get("fallback_topic_titles", {}) or {}).get(chat_id)
                     if fallback:
-                        reply_to = await self.topic_resolver.get_or_create_top_message_id(chat_id, str(fallback))
+                        reply_to = await self._resolve_reply_to(chat_id, str(fallback))
 
-                await self.rate_limiter.wait()
+                if reply_to is None and topic_title and self.current_settings().get("require_forum_topic"):
+                    log_event(
+                        self.logger,
+                        logging.INFO,
+                        "message_skipped_topic_not_found",
+                        chat_id=chat_id,
+                        topic_title=str(topic_title),
+                        message_id=msg.id,
+                        source_chat_id=source_chat_id,
+                    )
+
                 try:
                     if uploadable_media:
                         await with_retry(

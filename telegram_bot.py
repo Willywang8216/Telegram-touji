@@ -78,7 +78,7 @@ async def rebuild_forwarding_map():
                 continue
 
             peer_id = utils.get_peer_id(source_entity)
-            forwarding_map[int(peer_id)] = target_entity
+            forwarding_map[int(peer_id)] = {"target_bot": target_entity}
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
@@ -110,7 +110,16 @@ async def handler(event):
         log_event(logger, logging.INFO, "config_hot_reloaded")
 
     if event.chat_id in forwarding_map:
-        target_bot = forwarding_map[event.chat_id]
+        mapping = forwarding_map[event.chat_id]
+        if isinstance(mapping, dict):
+            target_bot = mapping.get("target_bot")
+        else:
+            target_bot = mapping
+
+        if not target_bot:
+            log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(event.chat_id), error="missing_target_bot")
+            return
+
         if event.message.grouped_id:
             async with media_group_lock:
                 key = (event.chat_id, event.message.grouped_id)

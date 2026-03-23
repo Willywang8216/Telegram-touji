@@ -357,8 +357,13 @@ async def main() -> None:
     )
     p.add_argument(
         "--session",
-        default="bot_session",
-        help="Telethon session name (default: bot_session). Stop relaybot first or use a different session if you get sqlite 'database is locked'.",
+        default="topic_session",
+        help="Telethon session name (default: topic_session). Stop userbot first or use a different session if you get sqlite 'database is locked'.",
+    )
+    p.add_argument(
+        "--bot-token",
+        default=None,
+        help="Optional. If set, login as bot. Note: listing forum topics via GetForumTopicsRequest is restricted for bots.",
     )
     args = p.parse_args()
 
@@ -377,7 +382,10 @@ async def main() -> None:
         return
 
     client = TelegramClient(str(args.session), settings["api_id"], settings["api_hash"])
-    await client.start(bot_token=settings["bot_token"])
+    if args.bot_token:
+        await client.start(bot_token=str(args.bot_token))
+    else:
+        await client.start()
 
     for chat_id in chat_ids:
         peer = await client.get_input_entity(int(chat_id))

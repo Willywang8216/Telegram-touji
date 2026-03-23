@@ -1,5 +1,7 @@
 import json
 import os
+import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -101,8 +103,37 @@ def _normalize_destinations(value: Any) -> list[dict[str, Any]]:
             continue
         dest = dict(item)
         dest["chat_id"] = _normalize_chat_id(dest["chat_id"])
+        if "topic_id" in dest and dest["topic_id"] is not None:
+            try:
+                dest["topic_id"] = int(dest["topic_id"])
+            except Exception:  # noqa: BLE001
+                dest.pop("topic_id", None)
         out.append(dest)
     return out
+
+
+_TOPIC_WS_RE = re.compile(r"\s+")
+
+
+def _normalize_topic_title(value: str) -> str:
+    s = unicodedata.normalize("NFKC", str(value or ""))
+    s = s.replace("\ufe0f", "").replace("\ufe0e", "")
+    s = _TOPIC_WS_RE.sub(" ", s).strip()
+
+    i = 0
+    while i < len(s):
+        ch = s[i]
+        if ch.isspace():
+            i += 1
+            continue
+        cat = unicodedata.category(ch)
+        if cat in {"So", "Sk", "Cf"}:
+            i += 1
+            continue
+        break
+    s = s[i:].lstrip()
+
+    return s.casefold()
 
 
 def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
@@ -113,8 +144,6 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     api_hash = _env_str("RELAY_API_HASH", _env_str("API_HASH", relay.get("api_hash", cfg.get("api_hash", ""))))
     bot_token = _env_str("RELAY_BOT_TOKEN", relay.get("bot_token", ""))
 
-    # Optional: restrict which user is allowed to DM the relay bot to trigger relays.
-    # If unset/0 -> allow any sender (less safe, but backwards-compatible).
     master_account_id = _env_int(
         "RELAY_MASTER_ACCOUNT_ID",
         int(relay.get("master_account_id", 0) or 0),
@@ -222,6 +251,27 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
             if titles:
                 topic_deletes[chat_id] = titles
 
+    forum_topic_ids_raw = relay.get("forum_topic_ids", {})
+    forum_topic_ids: dict[int, dict[str, int]] = {}
+    if isinstance(forum_topic_ids_raw, dict):
+        for k, v in forum_topic_ids_raw.items():
+            try:
+                chat_id = _normalize_chat_id(k)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(v, dict):
+                continue
+            topic_map: dict[str, int] = {}
+            for title, thread_id in v.items():
+                if title is None or thread_id is None:
+                    continue
+                try:
+                    topic_map[_normalize_topic_title(str(title))] = int(thread_id)
+                except Exception:  # noqa: BLE001
+                    continue
+            if topic_map:
+                forum_topic_ids[chat_id] = topic_map
+
     twitter_cookies_file = _env_str(
         "RELAY_TWITTER_COOKIES_FILE",
         str(relay.get("twitter_cookies_file")) if relay.get("twitter_cookies_file") else None,
@@ -239,7 +289,6 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "bot_token": bot_token,
         "dest_channels": dest_channels,
         "master_account_id": int(master_account_id or 0),
-        # Optional relay behavior controls (used by bot_relay.py)
         "strip_text": bool(relay.get("strip_text", False)),
         "post_captions": post_captions_norm,
         "blocklist_substrings": list(relay.get("blocklist_substrings", []) or []),
@@ -250,18 +299,13 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "default_destinations": default_destinations,
         "fallback_topic_titles": fallback_topic_titles_norm,
         "fallback_to_general_topic": bool(relay.get("fallback_to_general_topic", False)),
-        # If enabled: unrouted sources get distributed into topic buckets per destination chat.
         "distribute_unrouted_to_buckets": bool(relay.get("distribute_unrouted_to_buckets", False)),
-        # "source" (default): stable bucket per source_chat_id
-        # "message": bucket varies per forwarded message/album (more even distribution)
         "unrouted_distribution_mode": str(relay.get("unrouted_distribution_mode", "source") or "source"),
         "general_topic_buckets": general_topic_buckets_norm,
-        # Forum topic management (used by bot_relay.py)
-        # If false, bot_relay will not rename/hide/ensure topics at startup.
+        "forum_topic_ids": forum_topic_ids,
+        "require_forum_topic": bool(relay.get("require_forum_topic", False)),
         "manage_forum_topics": bool(relay.get("manage_forum_topics", True)),
-        # If false, bot_relay will NEVER create a topic on-demand.
         "allow_topic_creation": bool(relay.get("allow_topic_creation", True)),
-        # Optional forum topic management details
         "ensure_forum_topics": ensure_forum_topics,
         "topic_renames": topic_renames,
         "topic_deletes": topic_deletes,

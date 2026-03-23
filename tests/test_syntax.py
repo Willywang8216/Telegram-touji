@@ -15,6 +15,7 @@ class TestSyntax(unittest.TestCase):
             Path("twitter_expansion.py"),
             Path("scripts/sync_forum_topics.py"),
             Path("scripts/dedupe_forum_topics.py"),
+            Path("scripts/export_forum_topic_ids.py"),
         ]
         for p in files:
             with self.subTest(file=str(p)):

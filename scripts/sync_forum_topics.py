@@ -220,8 +220,13 @@ async def main() -> None:
     p.add_argument("--dry-run", action="store_true", help="Print actions without modifying topics")
     p.add_argument(
         "--session",
-        default="bot_session",
-        help="Telethon session name (default: bot_session). Stop relaybot first or use a different session if you get sqlite 'database is locked'.",
+        default="topic_session",
+        help="Telethon session name (default: topic_session). Stop userbot first or use a different session if you get sqlite 'database is locked'.",
+    )
+    p.add_argument(
+        "--bot-token",
+        default=None,
+        help="Optional. If set, login as bot. Note: listing forum topics via GetForumTopicsRequest is restricted for bots.",
     )
     args = p.parse_args()
 
@@ -233,7 +238,10 @@ async def main() -> None:
     settings = load_relay_settings(cm)
 
     client = TelegramClient(str(args.session), settings["api_id"], settings["api_hash"])
-    await client.start(bot_token=settings["bot_token"])
+    if args.bot_token:
+        await client.start(bot_token=str(args.bot_token))
+    else:
+        await client.start()
 
     ensure = relay_cfg.get("ensure_forum_topics", []) or []
     renames = _as_int_keyed_map(relay_cfg.get("topic_renames", {}) or {})
