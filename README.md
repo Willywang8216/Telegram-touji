@@ -1,138 +1,289 @@
-# Telegram Stealth Relay Bot (Dockerized)
+# Telegram Relay Bot (Telethon + Docker)
 
-一个基于 **Telethon + Docker Compose** 的 Telegram 消息中继系统：
-- `telegram_bot.py`（Userbot）负责监听源频道/群
-- `bot_relay.py`（RelayBot）负责无痕重发到目标频道
+A two-stage Telegram relay system:
 
----
+- `telegram_bot.py` (userbot): logs in as your Telegram user account, listens to source chats, and forwards/copies messages to a relay bot.
+- `bot_relay.py` (relaybot): logs in as a Telegram bot account and reposts messages into destination channels and forum topics.
 
-## ✨ 功能概览
+This repository is designed to be run via Docker Compose.
 
-- 支持多源到多目标的消息中继
-- 支持相册（media group）聚合转发
-- 支持命令过滤（`/`）与系统回执过滤（`🤖`）
-- 媒体转发策略：纯文本不转发；单张图片不转发；2 张及以上图片才转发；视频始终转发
-- 统一配置模块（JSON + `.env` 覆盖）
-- 结构化 JSON 日志
-- 限流 + 重试 + 死信（DLQ）
-- 运行时配置热重载（检测 `config.json` 变更）
-- **自动展开 Twitter/X 链接**：当消息文本里包含 Tweet 链接时，relaybot 会用 `yt-dlp` 下载图片/视频并以媒体形式发到目标频道/话题（下载失败则按媒体转发策略处理：纯文本会跳过）
+## Contents
 
----
+- Overview
+- How it works
+- Quick start
+- Configuration (`config.json` and `.env`)
+- Routing (multi-destination + forum topics)
+- Filtering (ban words + link limit)
+- Manage from the Telegram app (commands)
+- Troubleshooting
+- Development / tests
 
-## 🚀 一键安装（交互填写配置）
+## Overview
+
+Features:
+
+- Multi-source → multi-destination routing
+- Telegram albums (media groups)
+- Structured JSON logs
+- Rate limit + retry + DLQ (dead-letter queue)
+- Hot reload when `config.json` changes
+- Forum topic routing for destination forums (Telegram “Topics”)
+- Optional Twitter/X link expansion using `yt-dlp` (downloads tweet media and sends it as native media)
+
+## How it works
+
+1) Your **user account** (userbot) watches source channels/groups.
+2) When a new message arrives, userbot forwards/copies it to your **relay bot** chat.
+3) The relay bot reposts it into destination channels/topics based on `relay.routes`.
+
+Why two stages?
+
+- Many destination channels should be posted **as a bot** (clean sender identity).
+- A bot account has limitations (especially around forum topic listing); userbot can do “admin-like” fetching/exporting.
+
+## Quick start
+
+### Requirements
+
+- Docker + Docker Compose
+- Telegram API credentials (API ID + API hash)
+- A Telegram bot token
+
+### Install
+
+This repo includes an interactive install script:
 
 ```bash
-REPO_URL="https://github.com/ike666888/Telegram-touji.git" \
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/ike666888/Telegram-touji/main/scripts/install.sh)"
+REPO_URL="<REDACTED_REPO_URL>" \
+bash -c "$(curl -fsSL <REDACTED_INSTALL_SCRIPT_URL>)"
 ```
 
-执行后脚本会：
-1. 检测 Docker / Compose
-2. 克隆仓库（如本地不存在）
-3. 交互式询问配置参数
-4. 生成 `config.json` 与 `.env`
-5. 启动容器：`docker compose up -d --build`
+(Replace the URLs with your actual repo/script URL if you use the installer. If you run locally, just clone and edit configs.)
 
----
+### Start
 
-## ⚙️ 配置说明
+```bash
+docker compose up -d --build
+```
 
-安装脚本会提示填写这些核心参数：
+## Configuration
 
-- `api_id`
-- `api_hash`
-- `master_account_id`
-- `source_chat`
-- `target_bot`
-- `relay.bot_token`
-- `dest_channels`（逗号分隔）
+There are two configuration layers:
 
-### ✅ 重要：避免“用户号”直接发到目标群/频道
+- `config.json`: the canonical persisted configuration.
+- `.env`: optional environment variable overrides (recommended for secrets).
 
-如果你看到 **目标群/频道里显示你的用户号在发消息**，通常是以下两类问题：
+Important: if `.env` (or container env vars) sets a value, it can override `config.json`. If behavior doesn’t change after editing `config.json`, check `.env`.
 
-1) **`bot_mappings[].target_bot` 配错了（最常见）**
-- `target_bot` 必须是你的 **中转机器人（Bot）的用户名**，例如 `@MyRelayBot`。
-- 不能填目标群/频道的 `@channel`、也不能填 `-100...` 这样的群/频道 ID。
-- 否则 `telegram_bot.py` 会用你的 **用户号** 直接 `forward_messages()` 到目标群/频道。
+### Minimal redacted config example
 
-2) **relaybot 的 session 不是 Bot（历史遗留 session）**
-- 如果 `bot_session.session` 曾经用“用户号”登录过，Telethon 会认为已授权，从而忽略 `bot_token`，导致最终发送者变成用户号。
-- 处理方式：删除 `bot_session.session` 后重启 `relaybot` 容器。
+Create `config.json` based on `config.example.json`.
 
-### relay.master_account_id（可选，安全建议开启）
+```json
+{
+  "api_id": 123456,
+  "api_hash": "<REDACTED>",
+  "master_account_id": 123456789,
+  "bot_mappings": [
+    {"source_chat": -1001111111111, "target_bot": "@YourRelayBot"}
+  ],
+  "relay": {
+    "api_id": 123456,
+    "api_hash": "<REDACTED>",
+    "bot_token": "<REDACTED>",
+    "dest_channels": [-1002222222222],
 
-`relay.master_account_id`（或环境变量 `RELAY_MASTER_ACCOUNT_ID`）用于限制：只有指定用户 ID 私聊机器人时，才会触发转发。
-- 默认 `0`：不限制（兼容旧行为）
-- 建议设置为你运行 userbot 的那个用户号 ID，防止别人私聊你的 bot 就能向目标频道群发。
+    "routes": [
+      {
+        "source_chats": [-1001111111111],
+        "destinations": [
+          {"chat_id": -1002222222222, "topic_title": "Topic A"},
+          {"chat_id": -1003333333333, "topic_title": "Topic B"}
+        ]
+      }
+    ]
+  }
+}
+```
 
-### Forum Topics（频道话题）路由说明（为什么总是发到“General/一般聊天”）
+### bot_mappings (userbot stage)
 
-目标频道如果开启了 Forum Topics，要把消息发进某个话题，本质上要 **reply_to 该话题的 top_message id**（也就是 Bot API 里的 `message_thread_id`）。
+`bot_mappings` tells userbot what to listen to and which bot username to forward to.
 
-`bot_relay.py` 支持两种方式获取这个 id：
+- `source_chat`: a chat ID (e.g. `-100...`) or a username
+- `target_bot`: must be a **bot username** like `@YourRelayBot`
 
-1) **配置 `relay.forum_topic_ids`（推荐，最稳定）**
-- `forum_topic_ids` 的 value 不是 topic_id，而是 **top_message id**。
-- 生成方式（用“用户号”登录一次即可，不影响 relaybot 仍以 bot 发消息）：
-  ```bash
-  python scripts/export_forum_topic_ids.py --config config.json --write
-  ```
+If you mistakenly put a channel username or chat ID as `target_bot`, your **user account** may forward directly into that chat.
 
-> 如果你目标论坛里的话题“已经存在，但名字跟 config 里写的不一样”，可以在 `relay.topic_title_aliases` 里做别名映射，让脚本用“实际话题名”去查找，但仍把 id 写回到你配置的 `topic_title` 下。
-> 然后再次运行 export 脚本即可。
-> 
-> - 脚本会在 `forum_topic_not_found` 的日志里输出 `suggestions`（相似度最高的现有话题名），方便你填写别名。
+### relay section (relaybot stage)
 
-2) `destinations[].topic_id` 直接填 top_message id（适合少量手工配置）
+Core settings:
 
-> 重要：Telethon/MTProto 下，**bot 账号通常无法调用 `messages.GetForumTopics` 列出/搜索话题**，导致仅凭 `topic_title` 无法解析出 id。
-> 当 `reply_to=None` 时，Telegram 会把消息发到该 forum 的“General”话题（例如 Chatting&Sharing / 一般聊天🥵殼以澀澀🥵）。
+- `relay.bot_token`: the relay bot token
+- `relay.dest_channels`: destination chats (used when no route matches)
+- `relay.routes`: explicit routing rules
+- `relay.default_destinations`: fallback destinations when no route matches
 
-如果你希望“找不到话题就不要发”，请在 `relay` 里开启：
-- `require_forum_topic: true`
+Optional behavior:
 
-### Twitter/X 链接自动下载（tweet 媒体展开）
+- `relay.strip_text`: if `true`, remove all text/captions (media-only relay)
+- `relay.post_captions`: per-destination appended footer text
+- `relay.require_forum_topic`: if `true`, skip messages when the topic cannot be resolved
 
-当 relaybot 收到的消息文本里包含 Tweet 链接（`twitter.com/.../status/<id>` 或 `x.com/.../status/<id>`）时，会尝试用 `yt-dlp` 下载该 Tweet 的图片/视频，并以媒体形式发到目标频道/话题。
+## Routing
 
-配置项在 `relay` 里：
+### Multi-destination (one source → many destinations)
 
-- `expand_twitter_links`（默认 `true`）：是否启用
-- `twitter_cookies_file`（默认 `null`）：可选。指向一个 cookies 文件路径（Netscape cookiefile 格式），用于在 X 限制访问/需要登录时下载媒体
-- `twitter_max_media_files`（默认 `8`）：最多发送多少个媒体文件（避免一次 tweet 太多图导致发不出去）
+Each route can have multiple destinations:
 
-环境变量：
-- `RELAY_TWITTER_COOKIES_FILE`：覆盖 `twitter_cookies_file`（Docker/Compose 下建议放到仓库目录，比如 `./twitter.cookies.txt`，然后设置为 `/app/twitter.cookies.txt`）
+```json
+{
+  "source_chats": [-1001111111111],
+  "destinations": [
+    {"chat_id": -1002222222222, "topic_title": "🔥 Hot"},
+    {"chat_id": -1003333333333, "topic_title": "🔥 今日爆熱"}
+  ]
+}
+```
 
-> 注：某些 X 视频是 HLS 分片格式，需要 `ffmpeg` 才能合并。Docker 镜像已内置 `ffmpeg`。
+### Forum topics (destination)
 
-配置文件：
-- `config.json`：主配置（持久化）
-- `.env`：环境覆盖（敏感信息建议优先放这里）
+Telegram forum topics require sending with a `reply_to` pointing at the topic’s **top_message id** (Bot API calls it `message_thread_id`).
 
-> 注意：如果你修改了 `config.json` 但行为没变，优先检查 `.env` / 容器环境变量是否还在覆盖（尤其是 `RELAY_DEST_CHANNELS`、`RELAY_BOT_TOKEN`、`RELAY_MASTER_ACCOUNT_ID`）。
+In this project:
 
-`docker-compose.yml` 已通过 `env_file: .env` 自动注入运行环境。
+- `destinations[].topic_title`: a human-friendly title used for matching
+- `relay.forum_topic_ids`: mapping of destination `chat_id -> {topic_title -> top_message_id}`
 
----
+Why `forum_topic_ids` is necessary:
 
-## 🧩 项目结构
+- Bots are often blocked from listing/searching forum topics via MTProto.
+- When the relay bot cannot resolve the topic, Telegram posts into the forum’s General topic.
 
-- `telegram_bot.py`：Userbot 主逻辑（监听、命令处理、转发映射）
-- `bot_relay.py`：RelayBot 主逻辑（过滤、重发）
-- `common_config.py`：统一配置读取/保存、`.env` 支持、热重载检测
-- `structured_logger.py`：JSON 日志输出
-- `delivery.py`：限流、重试、DLQ
-- `command_utils.py`：命令解析工具
-- `twitter_expand.py`：Tweet URL 提取 + yt-dlp 下载封装
-- `scripts/install.sh`：交互式一键安装脚本
-- `tests/`：最小单元测试
+### Export forum topic IDs (recommended)
 
----
+Run this from a userbot-enabled environment (user login):
 
-## 🧪 本地验证
+```bash
+python scripts/export_forum_topic_ids.py --config config.json --write
+```
+
+If you see `forum_topic_not_found` warnings but you believe the topic exists, it may be:
+
+- The topic is archived/hidden
+- The topic has a different title than your config
+
+### Topic title aliases
+
+If your config uses “semantic” titles but the actual forum topic titles are different, use:
+
+- `relay.topic_title_aliases`
+
+Example:
+
+```json
+"topic_title_aliases": {
+  "-1002222222222": {
+    "🏋️ Gym Hunks": "💪 Jocks & Twinks"
+  }
+}
+```
+
+Then rerun export:
+
+```bash
+python scripts/export_forum_topic_ids.py --config config.json --write
+```
+
+### Dump available topics (for manual mapping)
+
+```bash
+python scripts/export_forum_topic_ids.py --config config.json --dump-topics-file topics_dump.json
+```
+
+This writes a JSON file containing the titles currently visible to MTProto.
+
+## Filtering (ban words + link limit)
+
+### Ban words
+
+`relay.blocklist_substrings` is a simple substring match. If any banned substring appears in the incoming message text (case-insensitive), the message is skipped.
+
+Notes:
+
+- This list is applied by **userbot** (before sending to relaybot) and by **relaybot** (before posting).
+- Very short tokens (e.g. single characters) can cause false positives.
+
+### Link limit
+
+Messages containing **more than 3 links** are skipped.
+
+- Counted patterns: `http://`, `https://`, `www.`, `t.me/`
+- Hashtags like `#tag` are not treated as links
+
+The link rule is enforced both in userbot and relaybot.
+
+## Manage from the Telegram app (commands)
+
+You can manage what the userbot listens to from within Telegram, without editing `config.json` manually.
+
+The command handler is implemented in `telegram_bot.py` and only accepts commands sent from `master_account_id`.
+
+Commands:
+
+- `/join <chat>`: join a channel/group (username or invite link)
+- `/leave <chat>`: leave a channel/group
+- `/add_listen <source_chat> <@relay_bot_username>`: start listening to a source chat and forward to a relay bot
+- `/remove_listen <source_chat>`: stop listening
+- `/list_listen`: list current listen mappings
+
+Practical usage:
+
+- Open **Saved Messages** (or a private chat with your own account).
+- Send the commands there (your userbot is the same account, so it sees them).
+
+Important:
+
+- These commands manage **listening** (userbot → relaybot). They do not edit `relay.routes`.
+- Routing to destination topics is controlled by `relay.routes` in `config.json`.
+
+If you want “fully configure routes from Telegram chat commands”, that can be added, but it is not implemented by default.
+
+## Troubleshooting
+
+### “My user account is posting into the destination chat”
+
+Common causes:
+
+1) `bot_mappings[].target_bot` is wrong (not a bot username)
+2) `bot_session.session` was previously logged in as a user
+
+Fix:
+
+- Ensure `target_bot` is `@YourRelayBot`
+- Delete `bot_session.session` and restart relaybot
+
+### “Everything goes to the General topic”
+
+- Populate `relay.forum_topic_ids` using `scripts/export_forum_topic_ids.py --write`
+- If you want to skip instead of falling back to General, set:
+  - `relay.require_forum_topic: true`
+
+### “Topic exists but export cannot find it”
+
+- Check if the topic is archived/hidden in the Telegram client
+- Use `relay.topic_title_aliases` and rerun export
+
+### Hot reload
+
+Both bots watch `config.json` changes. If you update config in-place, they will reload automatically.
+
+If you use `.env` overrides, you must restart containers for env changes to take effect.
+
+## Development / tests
+
+Recommended local checks:
 
 ```bash
 python -m unittest discover -s tests -v
