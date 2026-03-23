@@ -41,8 +41,19 @@ media_group_lock = asyncio.Lock()
 client = TelegramClient("anon", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
 forwarding_map: dict[int, object] = {}
 bot_mappings = settings["bot_mappings"]
+blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("blocklist_substrings", []) or []
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
+
+
+def _is_blocked(text: str) -> bool:
+    hay = str(text or "").casefold()
+    for s in blocklist_substrings or []:
+        if not s:
+            continue
+        if str(s).casefold() in hay:
+            return True
+    return False
 
 # Prefix used when we cannot forward (e.g. protected content / noforwards).
 # Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
@@ -186,14 +197,17 @@ async def safe_forward_single(target_bot, message_id, chat_id, *, noforwards: bo
 @client.on(NewMessage())
 async def handler(event):
     if config_manager.reload_if_changed():
-        global bot_mappings
+        global bot_mappings, blocklist_substrings
         bot_mappings = load_userbot_settings(config_manager)["bot_mappings"]
+        blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("blocklist_substrings", []) or []
         await rebuild_forwarding_map()
         log_event(logger, logging.INFO, "config_hot_reloaded")
 
     target_bot = forwarding_map.get(event.chat_id)
     if not target_bot:
         return
+
+    msg_text = getattr(event.message, "raw_text", "") or ""
 
     noforwards = bool(getattr(event.message, "noforwards", False))
     if not noforwards:
@@ -207,12 +221,25 @@ async def handler(event):
         async with media_group_lock:
             key = (event.chat_id, event.message.grouped_id)
             if key not in media_group_cache:
-                media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot, "noforwards": noforwards}
+                media_group_cache[key] = {
+                    "messages": [],
+                    "task": None,
+                    "target_bot": target_bot,
+                    "noforwards": noforwards,
+                    "blocked": False,
+                }
+
+            if msg_text and _is_blocked(msg_text):
+                media_group_cache[key]["blocked"] = True
+
             media_group_cache[key]["messages"].append(event.message)
             if media_group_cache[key]["task"]:
                 media_group_cache[key]["task"].cancel()
             media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
     else:
+        if msg_text and _is_blocked(msg_text):
+            log_event(logger, logging.INFO, "message_blocked", chat_id=str(event.chat_id), message_id=getattr(event.message, "id", None))
+            return
         await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards, msg=event.message)
 
 
@@ -229,6 +256,22 @@ async def process_media_group(key: tuple[int, int]):
 
     msgs = data.get("messages") or []
     msgs.sort(key=lambda m: m.id)
+
+    if data.get("blocked"):
+        log_event(logger, logging.INFO, "group_blocked", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    caption_check = next(
+        (
+            (getattr(m, "raw_text", None) or getattr(m, "text", None) or "")
+            for m in msgs
+            if (getattr(m, "raw_text", None) or getattr(m, "text", None))
+        ),
+        "",
+    )
+    if caption_check and _is_blocked(caption_check):
+        log_event(logger, logging.INFO, "group_blocked", chat_id=str(from_peer), group_id=grouped_id)
+        return
 
     try:
         if data.get("noforwards"):
