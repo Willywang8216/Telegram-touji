@@ -174,7 +174,16 @@ def _best_title_suggestions(needle: str, choices: list[str], *, limit: int = 5) 
         scored.append((float(score), str(c)))
 
     scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    return [c for _, c in scored[: int(limit)]]
+    out: list[str] = []
+    seen: set[str] = set()
+    for _, c in scored:
+        if c in seen:
+            continue
+        seen.add(c)
+        out.append(c)
+        if len(out) >= int(limit):
+            break
+    return out
 
 
 async def main() -> None:
@@ -196,6 +205,11 @@ async def main() -> None:
         default=5,
         help="When a configured title is not found, log up to N suggested existing titles (default: 5)",
     )
+    p.add_argument(
+        "--dump-topics-file",
+        default=None,
+        help="Write existing topic titles (per chat) into a JSON file for manual mapping.",
+    )
     args = p.parse_args()
 
     logger = get_logger("topic_export")
@@ -215,6 +229,7 @@ async def main() -> None:
     await client.start()  # user login
 
     forum_topic_ids_out: dict[str, dict[str, int]] = {}
+    topics_dump_out: dict[str, list[str]] = {}
 
     for chat_id, wanted_titles in sorted(required.items()):
         peer = await client.get_input_entity(int(chat_id))
@@ -227,6 +242,9 @@ async def main() -> None:
             norm = _normalize_title(raw_title)
             if norm:
                 by_norm[norm].append(t)
+
+        if args.dump_topics_file:
+            topics_dump_out[str(chat_id)] = sorted({t for t in all_titles if str(t).strip()})
 
         chat_map: dict[str, int] = {}
         alias_for_chat = aliases.get(int(chat_id), {})
@@ -268,6 +286,13 @@ async def main() -> None:
 
         if chat_map:
             forum_topic_ids_out[str(chat_id)] = chat_map
+
+    if args.dump_topics_file:
+        Path(str(args.dump_topics_file)).write_text(
+            json.dumps({"topics": topics_dump_out}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        log_event(logger, 20, "forum_topics_dump_written", path=str(args.dump_topics_file), chat_count=len(topics_dump_out))
 
     if args.write:
         relay = cfg.get("relay", {}) or {}

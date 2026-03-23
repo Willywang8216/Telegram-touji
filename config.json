@@ -236,6 +236,19 @@
 
     "require_forum_topic": false,
 
+    "topic_title_aliases": {
+      "-1002350290734": {
+        "🌍 Gay Westerner": "🌙 After Dark",
+        "🏋️ Gym Hunks": "💪 Jocks & Twinks",
+        "🐻 Asian bear": "🎯 Hidden Gems",
+        "📱 Viral Clips": "🔥 Hot Right Now"
+      },
+      "-1002349398833": {
+        "🏋️ 健身猛男": "💪 肌肉×鮮肉",
+        "🔒 鎖雞雞": "⛓️ 主奴調教"
+      }
+    },
+
     "forum_topic_ids": {
       "-1002350290734": {
         "Chatting&Sharing": 77830,
@@ -323,7 +336,6 @@
       "德州扑克",
       "德州撲克",
       "娱乐城",
-      "娛樂城",
       "qq",
       "扑克",
       "撲克",
@@ -343,7 +355,31 @@
       "福利",
       "优惠",
       "優惠",
-      "soso"
+      "soso",
+
+      "私聊",
+      "拉伸",
+      "挤奶",
+      "擠奶",
+      "广告",
+      "廣告",
+      "搬u",
+      "搬U",
+      "赚钱",
+      "賺錢",
+      "靠谱",
+      "靠譜",
+      "跑分",
+      "套路",
+      "进群",
+      "進群",
+      "上万",
+      "上萬",
+      "灰产",
+      "灰產",
+      "跑米",
+      "赚",
+      "賺"
     ],
 
     "distribute_unrouted_to_buckets": true,
