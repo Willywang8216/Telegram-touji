@@ -8,6 +8,7 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+
 try:
     from structured_logger import get_logger, log_event
 except ModuleNotFoundError:  # pragma: no cover
@@ -26,6 +27,7 @@ except ModuleNotFoundError:  # pragma: no cover
     def log_event(logger: logging.Logger, level: int, message: str, **kwargs):
         logger.log(level, message)
 
+
 logger = get_logger("userbot")
 config_manager = ConfigManager()
 settings = load_userbot_settings(config_manager)
@@ -35,10 +37,18 @@ media_group_cache: dict[tuple[int, int], dict] = {}
 media_group_lock = asyncio.Lock()
 
 client = TelegramClient("anon", settings["api_id"], settings["api_hash"], proxy=settings["proxy"])
-forwarding_map = {}
+forwarding_map: dict[int, object] = {}
 bot_mappings = settings["bot_mappings"]
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
+
+# Prefix used when we cannot forward (e.g. protected content / noforwards).
+# Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
+_SOURCE_CHAT_ID_MARKER_PREFIX = "\u2063SRC_CHAT_ID="
+
+
+def _with_source_marker(source_chat_id: int, text: str | None) -> str:
+    return f"{_SOURCE_CHAT_ID_MARKER_PREFIX}{int(source_chat_id)}\n" + (text or "")
 
 
 def update_config_file(new_bot_mappings):
@@ -77,23 +87,49 @@ async def rebuild_forwarding_map():
                 )
                 continue
 
-            peer_id = utils.get_peer_id(source_entity)
-            forwarding_map[int(peer_id)] = {"target_bot": target_entity}
+            peer_id = int(utils.get_peer_id(source_entity))
+            forwarding_map[peer_id] = target_entity
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
 
 
-async def safe_forward_single(target_bot, message_id, chat_id):
-    await rate_limiter.wait()
-    try:
+async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
+    text = getattr(msg, "raw_text", None) or getattr(msg, "text", None) or ""
+    marked_text = _with_source_marker(int(source_chat_id), text)
+
+    media = getattr(msg, "media", None)
+    if media is not None:
         await with_retry(
-            lambda: client.forward_messages(target_bot, message_id, from_peer=chat_id),
+            lambda: client.send_file(target_bot, media, caption=marked_text),
             retries=3,
             base_delay=1,
             logger=logger,
-            action="forward_single",
+            action="copy_single_media",
         )
+    else:
+        await with_retry(
+            lambda: client.send_message(target_bot, marked_text),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="copy_single_text",
+        )
+
+
+async def safe_forward_single(target_bot, message_id, chat_id, *, noforwards: bool = False, msg=None):
+    await rate_limiter.wait()
+    try:
+        if noforwards and msg is not None:
+            await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id))
+        else:
+            await with_retry(
+                lambda: client.forward_messages(target_bot, message_id, from_peer=chat_id),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action="forward_single",
+            )
         log_event(logger, logging.INFO, "message_forwarded", chat_id=str(chat_id), message_id=message_id)
     except Exception as exc:  # noqa: BLE001
         payload = {"chat_id": chat_id, "message_id": message_id, "error": str(exc)}
@@ -109,28 +145,29 @@ async def handler(event):
         await rebuild_forwarding_map()
         log_event(logger, logging.INFO, "config_hot_reloaded")
 
-    if event.chat_id in forwarding_map:
-        mapping = forwarding_map[event.chat_id]
-        if isinstance(mapping, dict):
-            target_bot = mapping.get("target_bot")
-        else:
-            target_bot = mapping
+    target_bot = forwarding_map.get(event.chat_id)
+    if not target_bot:
+        return
 
-        if not target_bot:
-            log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(event.chat_id), error="missing_target_bot")
-            return
+    noforwards = bool(getattr(event.message, "noforwards", False))
+    if not noforwards:
+        try:
+            chat = await event.get_chat()
+            noforwards = bool(getattr(chat, "noforwards", False))
+        except Exception:  # noqa: BLE001
+            pass
 
-        if event.message.grouped_id:
-            async with media_group_lock:
-                key = (event.chat_id, event.message.grouped_id)
-                if key not in media_group_cache:
-                    media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot}
-                media_group_cache[key]["messages"].append(event.message.id)
-                if media_group_cache[key]["task"]:
-                    media_group_cache[key]["task"].cancel()
-                media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
-        else:
-            await safe_forward_single(target_bot, event.message.id, event.chat_id)
+    if event.message.grouped_id:
+        async with media_group_lock:
+            key = (event.chat_id, event.message.grouped_id)
+            if key not in media_group_cache:
+                media_group_cache[key] = {"messages": [], "task": None, "target_bot": target_bot, "noforwards": noforwards}
+            media_group_cache[key]["messages"].append(event.message)
+            if media_group_cache[key]["task"]:
+                media_group_cache[key]["task"].cancel()
+            media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
+    else:
+        await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards, msg=event.message)
 
 
 async def process_media_group(key: tuple[int, int]):
@@ -144,18 +181,43 @@ async def process_media_group(key: tuple[int, int]):
         # Remove first so we never double-send even if forwarding throws.
         del media_group_cache[key]
 
+    msgs = data.get("messages") or []
+    msgs.sort(key=lambda m: m.id)
+
     try:
-        await rate_limiter.wait()
-        await with_retry(
-            lambda: client.forward_messages(data["target_bot"], data["messages"], from_peer=from_peer),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="forward_group",
-        )
-        log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(data["messages"]))
+        if data.get("noforwards"):
+            # Protected content: we cannot forward, so we copy + embed source chat id marker.
+            caption = next(
+                (
+                    (getattr(m, "raw_text", None) or getattr(m, "text", None) or "")
+                    for m in msgs
+                    if (getattr(m, "raw_text", None) or getattr(m, "text", None))
+                ),
+                "",
+            )
+            caption = _with_source_marker(int(from_peer), caption)
+            files = [m.media for m in msgs if getattr(m, "media", None)]
+            await rate_limiter.wait()
+            await with_retry(
+                lambda: client.send_file(data["target_bot"], files, caption=caption),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action="copy_group_media",
+            )
+            log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(msgs))
+        else:
+            await rate_limiter.wait()
+            await with_retry(
+                lambda: client.forward_messages(data["target_bot"], [m.id for m in msgs], from_peer=from_peer),
+                retries=3,
+                base_delay=1,
+                logger=logger,
+                action="forward_group",
+            )
+            log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(msgs))
     except Exception as exc:  # noqa: BLE001
-        payload = {"group_id": grouped_id, "messages": data["messages"], "error": str(exc)}
+        payload = {"group_id": grouped_id, "messages": [m.id for m in msgs], "error": str(exc)}
         write_dlq(DLQ_PATH, payload)
         log_event(logger, logging.ERROR, "group_forward_failed", **payload)
 
@@ -199,7 +261,7 @@ async def main():
             sub_parts = args.split(" ", 1)
             if len(sub_parts) == 2:
                 src, bot = sub_parts[0], sub_parts[1].strip()
-                if not bot.startswith("@"):
+                if not bot.startswith("@"): 
                     await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                     return
                 try:

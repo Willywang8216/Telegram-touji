@@ -35,6 +35,18 @@ DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 
 _TITLE_WS_RE = re.compile(r"\s+")
+_EMBEDDED_SOURCE_CHAT_ID_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?")
+
+
+def _extract_embedded_source_chat_id_and_strip(text: str) -> tuple[int | None, str]:
+    s = str(text or "")
+    m = _EMBEDDED_SOURCE_CHAT_ID_RE.match(s)
+    if not m:
+        return None, s
+    try:
+        return int(m.group(1)), s[m.end() :]
+    except Exception:  # noqa: BLE001
+        return None, s
 
 
 def normalize_forum_topic_title(value: str) -> str:
@@ -552,6 +564,9 @@ class RelayBot:
                 key = (event.chat_id, msg.grouped_id)
                 if key not in self.media_group_cache:
                     source_chat_id = _extract_forward_source_chat_id(msg)
+                    if source_chat_id is None:
+                        embedded, _ = _extract_embedded_source_chat_id_and_strip(getattr(msg, "raw_text", "") or "")
+                        source_chat_id = embedded
                     self.media_group_cache[key] = {"messages": [], "task": None, "source_chat_id": source_chat_id}
                 self.media_group_cache[key]["messages"].append(msg)
                 task = self.media_group_cache[key].get("task")
@@ -574,7 +589,7 @@ class RelayBot:
 
             msgs.sort(key=lambda x: x.id)
 
-            caption = next(
+            caption_raw = next(
                 (
                     (getattr(m, "raw_text", None) or getattr(m, "text", None) or "")
                     for m in msgs
@@ -582,6 +597,10 @@ class RelayBot:
                 ),
                 None,
             )
+            embedded_source, caption = _extract_embedded_source_chat_id_and_strip(caption_raw or "")
+            if source_chat_id is None:
+                source_chat_id = embedded_source
+
             files = [m.media for m in msgs if getattr(m, "media", None)]
             _, gid = key
 
@@ -664,11 +683,13 @@ class RelayBot:
         return s[: MEDIA_CAPTION_LIMIT - 1] + "…"
 
     async def send_copy(self, msg) -> None:
-        source_chat_id = _extract_forward_source_chat_id(msg)
+        forward_source = _extract_forward_source_chat_id(msg)
         original_text = getattr(msg, "raw_text", "") or ""
+        embedded_source, stripped_original_text = _extract_embedded_source_chat_id_and_strip(original_text)
+        source_chat_id = forward_source if forward_source is not None else embedded_source
 
         # We use the original text for tweet URL detection even if strip_text is enabled.
-        display_text = original_text
+        display_text = stripped_original_text
         if self.current_settings().get("strip_text"):
             display_text = ""
 

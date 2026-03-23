@@ -152,6 +152,42 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         await bot.handle(event)
         self.assertEqual(client.calls, [("send_message", -100, "hello", 42)])
 
+    async def test_embedded_source_chat_id_marker_routes_message_and_strips_prefix(self):
+        client = FakeClient()
+        source_id = 1234
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-999],
+                "master_account_id": 0,
+                "routes": [
+                    {
+                        "source_chats": [source_id],
+                        "destinations": [{"chat_id": -100, "topic_title": "TopicA"}],
+                    }
+                ],
+                "default_destinations": [{"chat_id": -200}],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(
+            message_id=10,
+            media=None,
+            raw_text="\u2063SRC_CHAT_ID=1234\nhello",
+            fwd_from=None,
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+
+        async def fake_get_or_create_top_message_id(chat_id, title):
+            return 42
+
+        bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
+
+        await bot.handle(event)
+        self.assertEqual(client.calls, [("send_message", -100, "hello", 42)])
+
     async def test_unrouted_sources_distributed_into_topic_buckets(self):
         client = FakeClient()
         bot = RelayBot(
