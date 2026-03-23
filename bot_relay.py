@@ -4,6 +4,7 @@ import re
 import tempfile
 import unicodedata
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from telethon import TelegramClient, events, functions, types, utils
@@ -34,9 +35,11 @@ except ModuleNotFoundError:  # pragma: no cover
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 
+_IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+_VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+
 _TITLE_WS_RE = re.compile(r"\s+")
 _EMBEDDED_SOURCE_CHAT_ID_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?")
-
 
 def _extract_embedded_source_chat_id_and_strip(text: str) -> tuple[int | None, str]:
     s = str(text or "")
@@ -577,6 +580,65 @@ class RelayBot:
                 return True
         return False
 
+    def _is_video_message(self, msg) -> bool:
+        return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None) or getattr(msg, "gif", None))
+
+    def _is_photo_message(self, msg) -> bool:
+        if getattr(msg, "photo", None) is not None:
+            return True
+
+        doc = getattr(msg, "document", None)
+        mime = str(getattr(doc, "mime_type", "") or "")
+        if mime.startswith("image/") and not self._is_video_message(msg):
+            return True
+
+        return False
+
+    def _looks_like_video_path(self, path: str) -> bool:
+        ext = Path(str(path)).suffix.lower()
+        return ext in _VIDEO_FILE_EXTS
+
+    def _looks_like_image_path(self, path: str) -> bool:
+        ext = Path(str(path)).suffix.lower()
+        return ext in _IMAGE_FILE_EXTS
+
+    def _should_relay_single(self, msg, *, uploadable_media: bool, expanded: ExpandedMedia | None) -> tuple[bool, str]:
+        if uploadable_media:
+            if self._is_video_message(msg):
+                return True, "video"
+            if self._is_photo_message(msg):
+                return False, "single_photo"
+            return True, "other_media"
+
+        if expanded is not None:
+            files = list(expanded.files or [])
+            if any(self._looks_like_video_path(p) for p in files):
+                return True, "expanded_video"
+            image_count = sum(1 for p in files if self._looks_like_image_path(p))
+            if image_count >= 2:
+                return True, "expanded_multi_image"
+            if image_count == 1:
+                return False, "expanded_single_image"
+            return False, "expanded_no_media"
+
+        return False, "text_only"
+
+    def _should_relay_album(self, msgs: list[Any]) -> tuple[bool, str]:
+        if any(self._is_video_message(m) for m in msgs):
+            return True, "video"
+
+        photo_count = sum(1 for m in msgs if self._is_photo_message(m))
+        if photo_count >= 2:
+            return True, "multi_photo"
+        if photo_count == 1:
+            return False, "single_photo"
+
+        # Non-photo album items (docs, etc). Keep previous behavior.
+        if any(getattr(m, "media", None) for m in msgs):
+            return True, "other_media"
+
+        return False, "no_media"
+
     async def _maybe_expand_twitter_media(self, original_text: str) -> ExpandedMedia | None:
         settings = self.current_settings()
         if not settings.get("expand_twitter_links", True):
@@ -701,8 +763,10 @@ class RelayBot:
                 log_event(self.logger, logging.INFO, "album_skipped_no_media", group_id=gid)
                 return
 
-            if self.current_settings().get("strip_text"):
-                caption = None
+            should_relay, reason = self._should_relay_album(msgs)
+            if not should_relay:
+                log_event(
+                    self.loggerNone
 
             for dest in self.resolve_destinations(source_chat_id, seed=gid):
                 chat_id = int(dest["chat_id"])
@@ -812,6 +876,18 @@ class RelayBot:
             expanded = await self._maybe_expand_twitter_media(stripped_original_text)
 
         try:
+            should_relay, reason = self._should_relay_single(msg, uploadable_media=uploadable_media, expanded=expanded)
+            if not should_relay:
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "message_skipped_policy",
+                    message_id=msg.id,
+                    source_chat_id=source_chat_id,
+                    reason=reason,
+                )
+                return
+
             for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
                 chat_id = int(dest["chat_id"])
                 topic_title = dest.get("topic_title")

@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from telethon import types, utils
 
@@ -37,12 +38,30 @@ class FakeForwardHeader:
 
 
 class FakeMessage:
-    def __init__(self, *, message_id=1, grouped_id=None, media=None, raw_text="", fwd_from=None):
+    def __init__(
+        self,
+        *,
+        message_id=1,
+        grouped_id=None,
+        media=None,
+        raw_text="",
+        fwd_from=None,
+        photo=None,
+        video=None,
+        gif=None,
+        round_video=None,
+        video_note=None,
+    ):
         self.id = message_id
         self.grouped_id = grouped_id
         self.media = media
         self.raw_text = raw_text
         self.fwd_from = fwd_from
+        self.photo = photo
+        self.video = video
+        self.gif = gif
+        self.round_video = round_video
+        self.video_note = video_note
 
 
 class FakeEvent:
@@ -58,7 +77,7 @@ class FakeEvent:
 
 
 class TestRelayBot(unittest.IsolatedAsyncioTestCase):
-    async def test_text_message_relays(self):
+    async def test_text_message_is_skipped(self):
         client = FakeClient()
         bot = RelayBot(
             client,
@@ -71,10 +90,88 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
         await bot.handle(event)
 
-        self.assertEqual(
-            client.calls,
-            [("send_message", -100, "hello", None), ("send_message", -200, "hello", None)],
+        self.assertEqual(client.calls, [])
+
+    async def test_single_photo_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
         )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", photo="PHOTO")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="cap", message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_video_always_relays(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", video="VIDEO")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="cap", message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
+
+    async def test_album_two_photos_relays(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        key = (1, 99)
+        bot.media_group_cache[key] = {
+            "messages": [
+                FakeMessage(message_id=1, grouped_id=99, media="M1", photo="PHOTO"),
+                FakeMessage(message_id=2, grouped_id=99, media="M2", photo="PHOTO"),
+            ],
+            "task": None,
+            "source_chat_id": None,
+        }
+
+        async def no_sleep(_):
+            return
+
+        with patch("bot_relay.asyncio.sleep", new=no_sleep):
+            await bot.process_media_group(key)
+
+        self.assertEqual(client.calls, [("send_file", -100, ["M1", "M2"], None, None)])
+
+    async def test_album_single_photo_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        key = (1, 99)
+        bot.media_group_cache[key] = {
+            "messages": [FakeMessage(message_id=1, grouped_id=99, media="M1", photo="PHOTO")],
+            "task": None,
+            "source_chat_id": None,
+        }
+
+        async def no_sleep(_):
+            return
+
+        with patch("bot_relay.asyncio.sleep", new=no_sleep):
+            await bot.process_media_group(key)
+
+        self.assertEqual(client.calls, [])
 
     async def test_media_message_relays_as_upload(self):
         client = FakeClient()
@@ -115,6 +212,30 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [("send_file", -100, ["F1.jpg", "F2.jpg"], msg.raw_text, None)])
 
+    async def test_tweet_link_single_image_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        async def fake_expand(original_text):
+            return ExpandedMedia(
+                files=["F1.jpg"],
+                cleanup=lambda: None,
+                url="https://x.com/i/web/status/1",
+            )
+
+        bot._maybe_expand_twitter_media = fake_expand
+
+        msg = FakeMessage(message_id=10, media=None, raw_text="https://twitter.com/user/status/1")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_routes_choose_destinations_by_source_chat_id(self):
         client = FakeClient()
         source_id = utils.get_peer_id(types.PeerChannel(123))
@@ -137,9 +258,10 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         msg = FakeMessage(
             message_id=10,
-            media=None,
+            media="MEDIA",
             raw_text="hello",
             fwd_from=FakeForwardHeader(types.PeerChannel(123)),
+            video="VIDEO",
         )
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
 
@@ -150,7 +272,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
 
         await bot.handle(event)
-        self.assertEqual(client.calls, [("send_message", -100, "hello", 42)])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 42)])
 
     async def test_embedded_source_chat_id_marker_routes_message_and_strips_prefix(self):
         client = FakeClient()
@@ -174,9 +296,10 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         msg = FakeMessage(
             message_id=10,
-            media=None,
+            media="MEDIA",
             raw_text="\u2063SRC_CHAT_ID=1234\nhello",
             fwd_from=None,
+            video="VIDEO",
         )
         event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
 
@@ -186,7 +309,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
 
         await bot.handle(event)
-        self.assertEqual(client.calls, [("send_message", -100, "hello", 42)])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 42)])
 
     async def test_unrouted_sources_distributed_into_topic_buckets(self):
         client = FakeClient()
@@ -207,9 +330,10 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         # source-based: abs(7) % 5 == 2 -> T3
         msg = FakeMessage(
             message_id=10,
-            media=None,
+            media="MEDIA",
             raw_text="hello",
             fwd_from=FakeForwardHeader(types.PeerChannel(7)),
+            video="VIDEO",
         )
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
 
@@ -219,7 +343,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
 
         await bot.handle(event)
-        self.assertEqual(client.calls, [("send_message", -100, "hello", 77)])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 77)])
 
     async def test_unrouted_distribution_mode_message_uses_message_id_seed(self):
         client = FakeClient()
@@ -241,9 +365,10 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         # message-based: msg.id=11 -> 11 % 5 == 1 -> T2
         msg = FakeMessage(
             message_id=11,
-            media=None,
+            media="MEDIA",
             raw_text="hello",
             fwd_from=FakeForwardHeader(types.PeerChannel(999)),
+            video="VIDEO",
         )
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
 
@@ -257,7 +382,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         await bot.handle(event)
         self.assertEqual(seen.get("title"), "T2")
-        self.assertEqual(client.calls, [("send_message", -100, "hello", 88)])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 88)])
 
     async def test_blocklist_applies_even_when_strip_text_enabled(self):
         client = FakeClient()
@@ -299,7 +424,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         bot.topic_resolver.get_or_create_top_message_id = fake_get_or_create_top_message_id
 
-        msg = FakeMessage(message_id=10, media=None, raw_text="hello")
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="hello", video="VIDEO")
         event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
         await bot.handle(event)
 
@@ -333,14 +458,15 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         msg = FakeMessage(
             message_id=10,
-            media=None,
+            media="MEDIA",
             raw_text="hello",
             fwd_from=FakeForwardHeader(types.PeerChannel(123)),
+            video="VIDEO",
         )
         event = FakeEvent(chat_id=1, sender_id=2, raw_text="hello", message=msg)
 
         await bot.handle(event)
-        self.assertEqual(client.calls, [("send_message", -100, "hello", 555)])
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 555)])
 
     async def test_media_message_blocked_by_blocklist(self):
         client = FakeClient()

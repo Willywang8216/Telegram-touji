@@ -60,7 +60,7 @@ class TestTwitterExpansionUrls(unittest.TestCase):
 class TestRelayBotTweetExpansion(unittest.IsolatedAsyncioTestCase):
     async def test_send_copy_expands_tweet_url_into_files(self):
         client = FakeClient()
-        resolver = FakeTweetResolver(files=["F1", "F2"])
+        resolver = FakeTweetResolver(files=["F1.jpg", "F2.jpg"])
         bot = RelayBot(
             client,
             FakeConfigManager(),
