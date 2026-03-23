@@ -1,7 +1,8 @@
 import asyncio
 import logging
+
+from telethon import TelegramClient, utils
 from telethon.events import NewMessage
-from telethon.sync import TelegramClient
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
 
 from command_utils import parse_command
@@ -76,8 +77,8 @@ async def rebuild_forwarding_map():
                 )
                 continue
 
-            peer_id = client.get_peer_id(source_entity)
-            forwarding_map[peer_id] = target_entity
+            peer_id = utils.get_peer_id(source_entity)
+            forwarding_map[int(peer_id)] = target_entity
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
