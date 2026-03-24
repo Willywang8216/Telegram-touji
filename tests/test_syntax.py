@@ -10,6 +10,7 @@ class TestSyntax(unittest.TestCase):
             Path("bot_relay.py"),
             Path("common_config.py"),
             Path("command_utils.py"),
+            Path("telegram_link_utils.py"),
             Path("delivery.py"),
             Path("structured_logger.py"),
             Path("twitter_expansion.py"),

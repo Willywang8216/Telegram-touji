@@ -13,6 +13,7 @@ from telethon import TelegramClient, events, functions, types, utils
 from command_utils import parse_command
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import download_tweet_media, extract_tweet_urls
 
 try:
@@ -724,6 +725,26 @@ class RelayBot:
             )
             return None
 
+    async def _resolve_message_link(self, link: str) -> tuple[int, int, int | None]:
+        parsed = parse_message_link(link)
+        if not parsed:
+            raise ValueError("invalid_link")
+
+        ent = await self.client.get_entity(parsed.chat)
+        chat_id = int(utils.get_peer_id(ent))
+
+        msg = await self.client.get_messages(ent, ids=int(parsed.message_id))
+        if not msg:
+            raise ValueError("message_not_found")
+
+        reply_to = getattr(msg, "reply_to", None)
+        top = getattr(reply_to, "reply_to_top_id", None)
+        topic_top = int(top) if top else (int(msg.id) if getattr(msg, "is_topic", False) else None)
+        if topic_top is None and parsed.topic_id is not None:
+            topic_top = int(parsed.topic_id)
+
+        return chat_id, int(parsed.message_id), topic_top
+
     def _parse_destinations_tokens(self, tokens: list[str]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for tok in tokens:
@@ -765,6 +786,7 @@ class RelayBot:
                 "🤖 RelayBot commands:\n"
                 "/list_routes\n"
                 "/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
+                "/add_route <source_message_link> <dest_message_link> [dest_message_link...]\n"
                 "/remove_route <index>\n"
                 "/set_destinations <index> <dest...>\n"
             )
@@ -792,7 +814,59 @@ class RelayBot:
         if cmd == "/add_route":
             tokens = shlex.split(args or "")
             if len(tokens) < 2:
-                await event.reply("🤖 用法: /add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...")
+                await event.reply(
+                    "🤖 用法: /add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
+                    "或: /add_route <source_message_link> <dest_message_link> [dest_message_link...]"
+                )
+                return
+
+            source_token = tokens[0]
+            if looks_like_message_link(source_token):
+                parsed = parse_message_link(source_token)
+                if not parsed:
+                    await event.reply("🤖 链接无效")
+                    return
+
+                try:
+                    ent = await self.client.get_entity(parsed.chat)
+                    src_chat_id = int(utils.get_peer_id(ent))
+                except Exception:  # noqa: BLE001
+                    await event.reply("🤖 无法解析 source chat（机器人可能不在该群/频道）")
+                    return
+
+                src_topic_id = int(parsed.topic_id) if parsed.topic_id is not None else None
+
+                destinations: list[dict[str, Any]] = []
+                non_link_dest_tokens: list[str] = []
+                for t in tokens[1:]:
+                    if looks_like_message_link(t):
+                        chat_id, _, topic_top = await self._resolve_message_link(t)
+                        dest: dict[str, Any] = {"chat_id": int(chat_id)}
+                        if topic_top is not None:
+                            dest["topic_id"] = int(topic_top)
+                        destinations.append(dest)
+                    else:
+                        non_link_dest_tokens.append(t)
+
+                destinations.extend(self._parse_destinations_tokens(non_link_dest_tokens))
+                if not destinations:
+                    await event.reply("🤖 错误: destinations 为空")
+                    return
+
+                cfg = self.config_manager.load(force=True)
+                cfg.setdefault("relay", {})
+                relay = cfg.get("relay", {}) or {}
+                routes = list(relay.get("routes", []) or [])
+
+                new_route: dict[str, Any] = {"source_chats": [int(src_chat_id)], "destinations": destinations}
+                if src_topic_id is not None:
+                    new_route["source_topics"] = [int(src_topic_id)]
+
+                routes.append(new_route)
+                relay["routes"] = routes
+                cfg["relay"] = relay
+                self._save_config_and_reload(cfg)
+                await event.reply("🤖 已添加 route")
                 return
 
             source_chats = [int(x) for x in tokens[0].split(",") if x.strip()]
@@ -849,11 +923,27 @@ class RelayBot:
         if cmd == "/set_destinations":
             tokens = shlex.split(args or "")
             if len(tokens) < 2:
-                await event.reply("🤖 用法: /set_destinations <index> <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...")
+                await event.reply(
+                    "🤖 用法: /set_destinations <index> <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
+                    "或: /set_destinations <index> <dest_message_link> [dest_message_link...]"
+                )
                 return
 
             idx = int(tokens[0]) - 1
-            destinations = self._parse_destinations_tokens(tokens[1:])
+
+            destinations: list[dict[str, Any]] = []
+            non_link_tokens: list[str] = []
+            for t in tokens[1:]:
+                if looks_like_message_link(t):
+                    chat_id, _, topic_top = await self._resolve_message_link(t)
+                    dest: dict[str, Any] = {"chat_id": int(chat_id)}
+                    if topic_top is not None:
+                        dest["topic_id"] = int(topic_top)
+                    destinations.append(dest)
+                else:
+                    non_link_tokens.append(t)
+
+            destinations.extend(self._parse_destinations_tokens(non_link_tokens))
 
             cfg = self.config_manager.load(force=True)
             relay = cfg.get("relay", {}) or {}

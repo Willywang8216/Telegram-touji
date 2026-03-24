@@ -229,6 +229,8 @@ Route management (edits `relay.routes` in `config.json`):
 
 - `/list_routes`
 - `/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>="<topic_title>" ...`
+- `/add_route <source_message_link> <dest_message_link> [dest_message_link...]`
+  - You can copy a message link from inside a forum topic and use it directly (the bot will infer the source topic and destination topic ids).
 - `/remove_route <index>`
 - `/set_destinations <index> <dest...>`
 
@@ -245,6 +247,12 @@ Topic-specific route example:
 ```
 /list_topics -1001111111111
 /add_route -1001111111111 source_topic=777 -1002222222222="Topic A"
+```
+
+Link-based route example (copy message links from Telegram):
+
+```
+/add_route https://t.me/c/<src_internal_id>/<topic_id>/<msg_id> https://t.me/c/<dest_internal_id>/<topic_id>/<msg_id>
 ```
 
 ### Relaybot commands (`bot_relay.py`)
