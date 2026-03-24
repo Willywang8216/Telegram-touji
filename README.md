@@ -226,29 +226,59 @@ The link rule is enforced both in userbot and relaybot.
 
 ## Manage from the Telegram app (commands)
 
-You can manage what the userbot listens to from within Telegram, without editing `config.json` manually.
+Both bots accept Telegram DM commands from your `master_account_id`.
 
-The command handler is implemented in `telegram_bot.py` and only accepts commands sent from `master_account_id`.
+- **Userbot commands** (send to Saved Messages / your own account): manage listening + list source forum topics.
+- **Relaybot commands** (send to the relay bot chat): manage `relay.routes` without editing `config.json` manually.
 
-Commands:
+### Userbot commands (`telegram_bot.py`)
 
 - `/join <chat>`: join a channel/group (username or invite link)
 - `/leave <chat>`: leave a channel/group
 - `/add_listen <source_chat> <@relay_bot_username>`: start listening to a source chat and forward to a relay bot
 - `/remove_listen <source_chat>`: stop listening
 - `/list_listen`: list current listen mappings
+- `/list_topics <chat_id_or_username> [limit]`: list forum topics and IDs in a source forum (use `top_message` for routing)
 
-Practical usage:
+### Route commands (relaybot `bot_relay.py`, also available via userbot)
 
-- Open **Saved Messages** (or a private chat with your own account).
-- Send the commands there (your userbot is the same account, so it sees them).
+- `/list_routes`
+- `/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>="<topic_title>" ...`
+- `/remove_route <index>`
+- `/set_destinations <index> <dest_chat>@<topic_top_msg_id> | <dest_chat>="<topic_title>" ...`
 
-Important:
+Notes:
 
-- These commands manage **listening** (userbot → relaybot). They do not edit `relay.routes`.
-- Routing to destination topics is controlled by `relay.routes` in `config.json`.
+- Route indices are **1-based** (as shown by `/list_routes`).
+- For topic routing, the recommended workflow is:
+  1) `/list_topics <source_forum_chat>` in userbot to obtain the source topic’s `top_message`.
+  2) `/add_route <source_chat> source_topic=<top_message> ...` in relaybot.
 
-If you want “fully configure routes from Telegram chat commands”, that can be added, but it is not implemented by default.
+## Topic-to-topic mapping (source forum → destination forum)
+
+If the **source chat is a forum**, Telegram topic messages belong to a thread identified by the topic’s `top_message` ID.
+
+This project supports topic-to-topic mapping by:
+
+- Userbot embedding `SRC_CHAT_ID` and `SRC_TOPIC_ID` markers into copied messages for forum-topic messages.
+- Relaybot matching routes with `source_chats` + optional `source_topics`.
+
+Example route:
+
+```json
+{
+  "source_chats": [-1001111111111],
+  "source_topics": [777],
+  "destinations": [
+    {"chat_id": -1002222222222, "topic_title": "Topic A"}
+  ]
+}
+```
+
+When `source_topics` is present:
+
+- Messages from that source chat **without** a detected `SRC_TOPIC_ID` will not match that route.
+- Messages with a `SRC_TOPIC_ID` will prefer topic-specific routes first, then fall back to chat-level routes.
 
 ## Troubleshooting
 

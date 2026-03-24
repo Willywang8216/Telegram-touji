@@ -1,9 +1,10 @@
 import asyncio
 import logging
 import re
+import shlex
 import tempfile
 
-from telethon import TelegramClient, utils
+from telethon import TelegramClient, functions, utils
 from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MessageIdInvalidError
 from telethon.events import NewMessage
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
@@ -68,13 +69,19 @@ def _count_links(text: str | None) -> int:
 def _has_too_many_links(text: str | None) -> bool:
     return _count_links(text) > _MAX_LINKS
 
-# Prefix used when we cannot forward (e.g. protected content / noforwards).
+
+# Prefix used when we cannot forward (e.g. protected content / noforwards) or when we need
+# to preserve routing metadata (source chat/topic) across a copy.
 # Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
 _SOURCE_CHAT_ID_MARKER_PREFIX = "\u2063SRC_CHAT_ID="
+_SOURCE_TOPIC_ID_MARKER_PREFIX = "\u2063SRC_TOPIC_ID="
 
 
-def _with_source_marker(source_chat_id: int, text: str | None) -> str:
-    return f"{_SOURCE_CHAT_ID_MARKER_PREFIX}{int(source_chat_id)}\n" + (text or "")
+def _with_source_marker(source_chat_id: int, source_topic_id: int | None, text: str | None) -> str:
+    out = f"{_SOURCE_CHAT_ID_MARKER_PREFIX}{int(source_chat_id)}\n"
+    if source_topic_id is not None:
+        out += f"{_SOURCE_TOPIC_ID_MARKER_PREFIX}{int(source_topic_id)}\n"
+    return out + (text or "")
 
 
 def update_config_file(new_bot_mappings):
@@ -120,13 +127,27 @@ async def rebuild_forwarding_map():
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
 
 
-def _is_invalid_message_error(exc: Exception) -> bool:
-    return isinstance(exc, MessageIdInvalidError)
+def _extract_source_topic_top_id(msg) -> int | None:
+    reply_to = getattr(msg, "reply_to", None)
+    top = getattr(reply_to, "reply_to_top_id", None)
+    if top:
+        try:
+            return int(top)
+        except Exception:  # noqa: BLE001
+            return None
+
+    if getattr(msg, "is_topic", False):
+        try:
+            return int(getattr(msg, "id", 0) or 0) or None
+        except Exception:  # noqa: BLE001
+            return None
+
+    return None
 
 
-async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
+async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int, source_topic_id: int | None):
     text = getattr(msg, "raw_text", None) or getattr(msg, "text", None) or ""
-    marked_text = _with_source_marker(int(source_chat_id), text)
+    marked_text = _with_source_marker(int(source_chat_id), source_topic_id, text)
 
     media = getattr(msg, "media", None)
     if media is not None:
@@ -134,7 +155,6 @@ async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
         try:
             local_path = await client.download_media(msg, file=tmp.name)
             if not local_path:
-                # If we can't download, at least send the marked caption/text.
                 await with_retry(
                     lambda: client.send_message(target_bot, marked_text),
                     retries=3,
@@ -153,22 +173,32 @@ async def _send_copy_to_bot(target_bot, msg, *, source_chat_id: int):
             )
         finally:
             tmp.cleanup()
-    else:
-        await with_retry(
-            lambda: client.send_message(target_bot, marked_text),
-            retries=3,
-            base_delay=1,
-            logger=logger,
-            action="copy_single_text",
-        )
+        return
+
+    await with_retry(
+        lambda: client.send_message(target_bot, marked_text),
+        retries=3,
+        base_delay=1,
+        logger=logger,
+        action="copy_single_text",
+    )
 
 
-async def safe_forward_single(target_bot, message_id, chat_id, *, noforwards: bool = False, msg=None):
+async def safe_forward_single(
+    target_bot,
+    message_id,
+    chat_id,
+    *,
+    noforwards: bool = False,
+    force_copy: bool = False,
+    source_topic_id: int | None = None,
+    msg=None,
+):
     await rate_limiter.wait()
 
-    if noforwards and msg is not None:
+    if (noforwards or force_copy) and msg is not None:
         try:
-            await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id))
+            await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id), source_topic_id=source_topic_id)
             log_event(logger, logging.INFO, "message_copied", chat_id=str(chat_id), message_id=message_id)
         except Exception as exc:  # noqa: BLE001
             payload = {"chat_id": chat_id, "message_id": message_id, "error": str(exc)}
@@ -186,10 +216,9 @@ async def safe_forward_single(target_bot, message_id, chat_id, *, noforwards: bo
         )
         log_event(logger, logging.INFO, "message_forwarded", chat_id=str(chat_id), message_id=message_id)
     except (ChatForwardsRestrictedError, MessageIdInvalidError) as exc:
-        # Fallback: if forward fails but we have the message, try copy.
         if msg is not None:
             try:
-                await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id))
+                await _send_copy_to_bot(target_bot, msg, source_chat_id=int(chat_id), source_topic_id=source_topic_id)
                 log_event(logger, logging.INFO, "message_copied_fallback", chat_id=str(chat_id), message_id=message_id)
                 return
             except Exception as copy_exc:  # noqa: BLE001
@@ -230,6 +259,9 @@ async def handler(event):
         except Exception:  # noqa: BLE001
             pass
 
+    source_topic_id = _extract_source_topic_top_id(event.message)
+    force_copy = source_topic_id is not None
+
     if event.message.grouped_id:
         async with media_group_lock:
             key = (event.chat_id, event.message.grouped_id)
@@ -240,7 +272,10 @@ async def handler(event):
                     "target_bot": target_bot,
                     "noforwards": noforwards,
                     "blocked": False,
+                    "source_topic_id": source_topic_id,
                 }
+            elif media_group_cache[key].get("source_topic_id") is None and source_topic_id is not None:
+                media_group_cache[key]["source_topic_id"] = source_topic_id
 
             if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
                 media_group_cache[key]["blocked"] = True
@@ -249,18 +284,28 @@ async def handler(event):
             if media_group_cache[key]["task"]:
                 media_group_cache[key]["task"].cancel()
             media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
-    else:
-        if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
-            log_event(
-                logger,
-                logging.INFO,
-                "message_blocked",
-                chat_id=str(event.chat_id),
-                message_id=getattr(event.message, "id", None),
-                links=_count_links(msg_text) if _has_too_many_links(msg_text) else None,
-            )
-            return
-        await safe_forward_single(target_bot, event.message.id, event.chat_id, noforwards=noforwards, msg=event.message)
+        return
+
+    if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
+        log_event(
+            logger,
+            logging.INFO,
+            "message_blocked",
+            chat_id=str(event.chat_id),
+            message_id=getattr(event.message, "id", None),
+            links=_count_links(msg_text) if _has_too_many_links(msg_text) else None,
+        )
+        return
+
+    await safe_forward_single(
+        target_bot,
+        event.message.id,
+        event.chat_id,
+        noforwards=noforwards,
+        force_copy=force_copy,
+        source_topic_id=source_topic_id,
+        msg=event.message,
+    )
 
 
 async def process_media_group(key: tuple[int, int]):
@@ -271,7 +316,6 @@ async def process_media_group(key: tuple[int, int]):
         data = media_group_cache.get(key)
         if not data:
             return
-        # Remove first so we never double-send even if forwarding throws.
         del media_group_cache[key]
 
     msgs = data.get("messages") or []
@@ -290,12 +334,21 @@ async def process_media_group(key: tuple[int, int]):
         "",
     )
     if caption_check and (_is_blocked(caption_check) or _has_too_many_links(caption_check)):
-        log_event(logger, logging.INFO, "group_blocked", chat_id=str(from_peer), group_id=grouped_id, links=_count_links(caption_check) if _has_too_many_links(caption_check) else None)
+        log_event(
+            logger,
+            logging.INFO,
+            "group_blocked",
+            chat_id=str(from_peer),
+            group_id=grouped_id,
+            links=_count_links(caption_check) if _has_too_many_links(caption_check) else None,
+        )
         return
 
+    source_topic_id = data.get("source_topic_id")
+    force_copy = source_topic_id is not None
+
     try:
-        if data.get("noforwards"):
-            # Protected content: we cannot forward, so we copy + embed source chat id marker.
+        if data.get("noforwards") or force_copy:
             caption = next(
                 (
                     (getattr(m, "raw_text", None) or getattr(m, "text", None) or "")
@@ -304,7 +357,7 @@ async def process_media_group(key: tuple[int, int]):
                 ),
                 "",
             )
-            caption = _with_source_marker(int(from_peer), caption)
+            caption = _with_source_marker(int(from_peer), source_topic_id, caption)
 
             tmp = tempfile.TemporaryDirectory(prefix="userbot_copy_group_")
             try:
@@ -338,16 +391,17 @@ async def process_media_group(key: tuple[int, int]):
                 log_event(logger, logging.INFO, "group_copied", group_id=grouped_id, count=len(msgs))
             finally:
                 tmp.cleanup()
-        else:
-            await rate_limiter.wait()
-            await with_retry(
-                lambda: client.forward_messages(data["target_bot"], [m.id for m in msgs], from_peer=from_peer),
-                retries=3,
-                base_delay=1,
-                logger=logger,
-                action="forward_group",
-            )
-            log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(msgs))
+            return
+
+        await rate_limiter.wait()
+        await with_retry(
+            lambda: client.forward_messages(data["target_bot"], [m.id for m in msgs], from_peer=from_peer),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="forward_group",
+        )
+        log_event(logger, logging.INFO, "group_forwarded", group_id=grouped_id, count=len(msgs))
     except Exception as exc:  # noqa: BLE001
         payload = {"group_id": grouped_id, "messages": [m.id for m in msgs], "error": str(exc)}
         write_dlq(DLQ_PATH, payload)
@@ -360,6 +414,202 @@ async def join_chat(entity):
 
 async def leave_chat(entity):
     await client(LeaveChannelRequest(entity))
+
+
+def _parse_destinations(tokens: list[str]) -> list[dict]:
+    out: list[dict] = []
+    for tok in tokens:
+        if not tok:
+            continue
+        if "@" in tok:
+            chat_str, topic_str = tok.split("@", 1)
+            out.append({"chat_id": int(chat_str), "topic_id": int(topic_str)})
+            continue
+        if "=" in tok:
+            chat_str, title = tok.split("=", 1)
+            title = title.strip()
+            out.append({"chat_id": int(chat_str), "topic_title": title})
+            continue
+        out.append({"chat_id": int(tok)})
+    return out
+
+
+def _format_destinations(destinations: list[dict]) -> str:
+    parts: list[str] = []
+    for d in destinations or []:
+        chat_id = d.get("chat_id")
+        if d.get("topic_id") is not None:
+            parts.append(f"{chat_id}@{d.get('topic_id')}")
+        elif d.get("topic_title"):
+            parts.append(f"{chat_id}=\"{d.get('topic_title')}\"")
+        else:
+            parts.append(str(chat_id))
+    return " ".join(parts)
+
+
+async def _cmd_list_routes(event):
+    cfg = config_manager.load(force=True)
+    relay = cfg.get("relay", {}) or {}
+    routes = relay.get("routes", []) or []
+    if not routes:
+        await event.reply("🤖 routes 为空")
+        return
+
+    lines: list[str] = []
+    for i, r in enumerate(routes, start=1):
+        src = ",".join(str(x) for x in (r.get("source_chats") or []))
+        topics = r.get("source_topics") or []
+        topic_str = f" topics={','.join(str(x) for x in topics)}" if topics else ""
+        dest = _format_destinations(r.get("destinations") or [])
+        lines.append(f"{i}) {src}{topic_str} -> {dest}")
+
+    await event.reply("🤖 Routes:\n" + "\n".join(lines[:50]))
+
+
+def _save_routes(routes: list[dict]) -> None:
+    cfg = config_manager.load(force=True)
+    cfg.setdefault("relay", {})
+    cfg["relay"]["routes"] = routes
+    config_manager.save(cfg)
+
+
+async def _cmd_add_route(event, args: str):
+    tokens = shlex.split(args or "")
+    if len(tokens) < 2:
+        await event.reply("🤖 用法: /add_route <source_chat_id[,source_chat_id...]> [source_topic=<top_msg_id>] <dest_chat>[@<topic_top_msg_id>] | <dest_chat>=\"<topic_title>\" ...")
+        return
+
+    source_chats = [int(x) for x in tokens[0].split(",") if x.strip()]
+    source_topic_id = None
+
+    dest_tokens: list[str] = []
+    for t in tokens[1:]:
+        if t.startswith("source_topic=") or t.startswith("topic="):
+            source_topic_id = int(t.split("=", 1)[1])
+            continue
+        dest_tokens.append(t)
+
+    destinations = _parse_destinations(dest_tokens)
+    if not destinations:
+        await event.reply("🤖 错误: destinations 为空")
+        return
+
+    cfg = config_manager.load(force=True)
+    cfg.setdefault("relay", {})
+    routes = list((cfg.get("relay", {}) or {}).get("routes", []) or [])
+
+    new_route: dict = {"source_chats": source_chats, "destinations": destinations}
+    if source_topic_id is not None:
+        new_route["source_topics"] = [int(source_topic_id)]
+
+    routes.append(new_route)
+    _save_routes(routes)
+    await event.reply("🤖 已添加 route")
+
+
+async def _cmd_remove_route(event, args: str):
+    tokens = shlex.split(args or "")
+    if len(tokens) != 1:
+        await event.reply("🤖 用法: /remove_route <route_index>")
+        return
+
+    idx = int(tokens[0]) - 1
+    cfg = config_manager.load(force=True)
+    relay = cfg.get("relay", {}) or {}
+    routes = list(relay.get("routes", []) or [])
+
+    if idx < 0 or idx >= len(routes):
+        await event.reply("🤖 错误: route_index 超出范围")
+        return
+
+    routes.pop(idx)
+    _save_routes(routes)
+    await event.reply("🤖 已移除 route")
+
+
+async def _cmd_set_destinations(event, args: str):
+    tokens = shlex.split(args or "")
+    if len(tokens) < 2:
+        await event.reply("🤖 用法: /set_destinations <route_index> <dest_chat>[@<topic_top_msg_id>] | <dest_chat>=\"<topic_title>\" ...")
+        return
+
+    idx = int(tokens[0]) - 1
+    destinations = _parse_destinations(tokens[1:])
+
+    cfg = config_manager.load(force=True)
+    relay = cfg.get("relay", {}) or {}
+    routes = list(relay.get("routes", []) or [])
+
+    if idx < 0 or idx >= len(routes):
+        await event.reply("🤖 错误: route_index 超出范围")
+        return
+
+    routes[idx]["destinations"] = destinations
+    _save_routes(routes)
+    await event.reply("🤖 已更新 destinations")
+
+
+async def _cmd_list_topics(event, args: str):
+    tokens = shlex.split(args or "")
+    if not tokens:
+        await event.reply("🤖 用法: /list_topics <chat_id_or_username> [limit]")
+        return
+
+    chat_ref = tokens[0]
+    limit = int(tokens[1]) if len(tokens) > 1 else 50
+    limit = max(1, min(limit, 200))
+
+    try:
+        ent = await client.get_entity(chat_ref)
+        peer = await client.get_input_entity(ent)
+
+        offset_date = 0
+        offset_id = 0
+        offset_topic = 0
+        remaining = limit
+        topics = []
+
+        while remaining > 0:
+            batch = min(100, remaining)
+            res = await client(
+                functions.messages.GetForumTopicsRequest(
+                    peer=peer,
+                    q="",
+                    offset_date=offset_date,
+                    offset_id=offset_id,
+                    offset_topic=offset_topic,
+                    limit=batch,
+                )
+            )
+
+            if not getattr(res, "topics", None):
+                break
+
+            for t in res.topics:
+                topics.append(t)
+            last = res.topics[-1]
+            offset_date = int(getattr(last, "date", 0) or 0)
+            offset_id = int(getattr(last, "top_message", 0) or 0)
+            offset_topic = int(getattr(last, "id", 0) or 0)
+            remaining = limit - len(topics)
+
+            if len(res.topics) < batch:
+                break
+
+        if not topics:
+            await event.reply("🤖 未找到 topics（可能该群未启用话题，或无权限）")
+            return
+
+        lines = []
+        for t in topics[:limit]:
+            title = str(getattr(t, "title", ""))
+            top_message = int(getattr(t, "top_message", 0) or 0)
+            topic_id = int(getattr(t, "id", 0) or 0)
+            lines.append(f"{title} | top_message={top_message} | topic_id={topic_id}")
+
+        await event.reply("🤖 Topics (use top_message for source_topic):\n" + "\n".join(lines[:80]))
+    except Exception as exc:  # noqa: BLE001
+        await event.reply(f"🤖 读取 topics 失败: {type(exc).__name__}: {exc}")
 
 
 async def main():
@@ -379,7 +629,7 @@ async def main():
                 await join_chat(ent)
                 await event.reply(f"🤖 已尝试加入: {ent.title}")
             except Exception as exc:  # noqa: BLE001
-                await event.reply(f"🤖 加入失败: {exc}")
+                await event.reply(f"🤖 加入失败: {type(exc).__name__}: {exc}")
 
         elif cmd == "/leave":
             try:
@@ -387,48 +637,51 @@ async def main():
                 await leave_chat(ent)
                 await event.reply(f"🤖 已尝试退出: {ent.title}")
             except Exception as exc:  # noqa: BLE001
-                await event.reply(f"🤖 退出失败: {exc}")
+                await event.reply(f"🤖 退出失败: {type(exc).__name__}: {exc}")
 
         elif cmd == "/add_listen":
-            sub_parts = args.split(" ", 1)
-            if len(sub_parts) == 2:
-                src, bot = sub_parts[0], sub_parts[1].strip()
-                if not bot.startswith("@"): 
-                    await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
-                    return
-                try:
-                    ent = await client.get_entity(bot)
-                    if not getattr(ent, "bot", False):
-                        await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
-                        return
-                    exists = next((m for m in bot_mappings if str(m["source_chat"]) == str(src)), None)
-                    if exists:
-                        if exists["target_bot"] == bot:
-                            await event.reply(f"🤖 '{src}' 已经在监听列表中了。")
-                        else:
-                            new_map = [m for m in bot_mappings if str(m["source_chat"]) != str(src)]
-                            new_map.append({"source_chat": src, "target_bot": bot})
-                            update_config_file(new_map)
-                            await event.reply(f"🤖 更新成功: {src} -> {bot}")
-                    else:
-                        new_map = bot_mappings + [{"source_chat": src, "target_bot": bot}]
-                        update_config_file(new_map)
-                        await event.reply(f"🤖 添加成功: {src} -> {bot}")
-                except Exception as exc:  # noqa: BLE001
-                    await event.reply(f"🤖 操作失败: {exc}")
-            else:
+            sub_parts = (args or "").split(" ", 1)
+            if len(sub_parts) != 2:
                 await event.reply("🤖 用法: /add_listen <源ID> <@目标机器人>")
+                return
+
+            src, bot = sub_parts[0], sub_parts[1].strip()
+            if not bot.startswith("@"):  
+                await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
+                return
+
+            try:
+                ent = await client.get_entity(bot)
+                if not getattr(ent, "bot", False):
+                    await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
+                    return
+
+                exists = next((m for m in bot_mappings if str(m["source_chat"]) == str(src)), None)
+                if exists:
+                    if exists["target_bot"] == bot:
+                        await event.reply(f"🤖 '{src}' 已经在监听列表中了。")
+                    else:
+                        new_map = [m for m in bot_mappings if str(m["source_chat"]) != str(src)]
+                        new_map.append({"source_chat": src, "target_bot": bot})
+                        update_config_file(new_map)
+                        await event.reply(f"🤖 更新成功: {src} -> {bot}")
+                else:
+                    new_map = bot_mappings + [{"source_chat": src, "target_bot": bot}]
+                    update_config_file(new_map)
+                    await event.reply(f"🤖 添加成功: {src} -> {bot}")
+            except Exception as exc:  # noqa: BLE001
+                await event.reply(f"🤖 操作失败: {type(exc).__name__}: {exc}")
 
         elif cmd == "/remove_listen":
-            if args:
-                new_map = [m for m in bot_mappings if str(m["source_chat"]) != str(args)]
-                if len(new_map) < len(bot_mappings):
-                    update_config_file(new_map)
-                    await event.reply(f"🤖 已移除监听: {args}")
-                else:
-                    await event.reply(f"🤖 '{args}' 不在列表中。")
-            else:
+            if not args:
                 await event.reply("🤖 用法: /remove_listen <源ID>")
+                return
+            new_map = [m for m in bot_mappings if str(m["source_chat"]) != str(args)]
+            if len(new_map) < len(bot_mappings):
+                update_config_file(new_map)
+                await event.reply(f"🤖 已移除监听: {args}")
+            else:
+                await event.reply(f"🤖 '{args}' 不在列表中。")
 
         elif cmd == "/list_listen":
             if bot_mappings:
@@ -436,6 +689,36 @@ async def main():
                 await event.reply(f"🤖 当前监听:\n{info}")
             else:
                 await event.reply("🤖 当前列表为空。")
+
+        elif cmd == "/list_routes":
+            await _cmd_list_routes(event)
+
+        elif cmd == "/add_route":
+            await _cmd_add_route(event, args)
+
+        elif cmd == "/remove_route":
+            await _cmd_remove_route(event, args)
+
+        elif cmd == "/set_destinations":
+            await _cmd_set_destinations(event, args)
+
+        elif cmd == "/list_topics":
+            await _cmd_list_topics(event, args)
+
+        else:
+            await event.reply(
+                "🤖 Commands:\n"
+                "/join <chat>\n"
+                "/leave <chat>\n"
+                "/add_listen <source_chat> <@relay_bot>\n"
+                "/remove_listen <source_chat>\n"
+                "/list_listen\n"
+                "/list_topics <chat> [limit]\n"
+                "/list_routes\n"
+                "/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
+                "/remove_route <index>\n"
+                "/set_destinations <index> <dest...>\n"
+            )
 
     await client.run_until_disconnected()
 

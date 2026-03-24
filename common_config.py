@@ -183,10 +183,24 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
             if not isinstance(r, dict):
                 continue
             source_chats = [_normalize_chat_id(x) for x in r.get("source_chats", [])]
+
+            source_topics: list[int] = []
+            raw_topics = r.get("source_topics", [])
+            if isinstance(raw_topics, list):
+                for t in raw_topics:
+                    try:
+                        source_topics.append(int(t))
+                    except Exception:  # noqa: BLE001
+                        continue
+
             destinations = _normalize_destinations(r.get("destinations", []))
             if not source_chats or not destinations:
                 continue
-            routes.append({"source_chats": source_chats, "destinations": destinations})
+
+            out = {"source_chats": source_chats, "destinations": destinations}
+            if source_topics:
+                out["source_topics"] = source_topics
+            routes.append(out)
 
     default_destinations = _normalize_destinations(relay.get("default_destinations", []))
 

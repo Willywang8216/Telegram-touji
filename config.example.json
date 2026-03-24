@@ -27,6 +27,11 @@
       {
         "source_chats": [-1001234567890],
         "destinations": [{"chat_id": -1009876543210, "topic_title": "Topic A"}]
+      },
+      {
+        "source_chats": [-1001234567890],
+        "source_topics": [777],
+        "destinations": [{"chat_id": -1009876543210, "topic_title": "Topic B"}]
       }
     ],
 

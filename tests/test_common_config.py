@@ -47,6 +47,21 @@ class TestCommonConfig(unittest.TestCase):
         s = load_relay_settings(m)
         self.assertEqual(s["dest_channels"], [-200, -300])
 
+    def test_routes_source_topics_are_loaded(self):
+        cfg = json.loads(self.path.read_text(encoding="utf-8"))
+        cfg["relay"]["routes"] = [
+            {
+                "source_chats": [-123],
+                "source_topics": [777],
+                "destinations": [{"chat_id": -100, "topic_title": "T"}],
+            }
+        ]
+        self.path.write_text(json.dumps(cfg), encoding="utf-8")
+
+        m = ConfigManager(str(self.path))
+        s = load_relay_settings(m)
+        self.assertEqual(s["routes"], [{"source_chats": [-123], "source_topics": [777], "destinations": [{"chat_id": -100, "topic_title": "T"}]}])
+
     def test_relay_master_account_default(self):
         m = ConfigManager(str(self.path))
         s = load_relay_settings(m)

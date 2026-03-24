@@ -331,6 +331,36 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         await bot.handle(event)
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 42)])
 
+    async def test_topic_specific_routes_choose_destinations_by_source_topic_id(self):
+        client = FakeClient()
+        source_id = 1234
+
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {
+                "dest_channels": [-999],
+                "master_account_id": 0,
+                "routes": [
+                    {"source_chats": [source_id], "destinations": [{"chat_id": -100}]},
+                    {"source_chats": [source_id], "source_topics": [777], "destinations": [{"chat_id": -200}]},
+                ],
+            },
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(
+            message_id=10,
+            media="MEDIA",
+            raw_text="\u2063SRC_CHAT_ID=1234\n\u2063SRC_TOPIC_ID=777\nhello",
+            fwd_from=None,
+            video="VIDEO",
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+
+        await bot.handle(event)
+        self.assertEqual(client.calls, [("send_file", -200, "MEDIA", "hello", None)])
+
     async def test_unrouted_sources_distributed_into_topic_buckets(self):
         client = FakeClient()
         bot = RelayBot(

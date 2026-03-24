@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import shlex
 import tempfile
 import unicodedata
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Callable
 
 from telethon import TelegramClient, events, functions, types, utils
 
+from command_utils import parse_command
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from twitter_expand import download_tweet_media, extract_tweet_urls
@@ -42,17 +44,23 @@ _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
 _URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 _TITLE_WS_RE = re.compile(r"\s+")
-_EMBEDDED_SOURCE_CHAT_ID_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?")
+_EMBEDDED_SOURCE_MARKERS_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?(?:\u2063SRC_TOPIC_ID=(\d+)\n?)?")
 
-def _extract_embedded_source_chat_id_and_strip(text: str) -> tuple[int | None, str]:
+
+def _extract_embedded_source_markers_and_strip(text: str) -> tuple[int | None, int | None, str]:
     s = str(text or "")
-    m = _EMBEDDED_SOURCE_CHAT_ID_RE.match(s)
+    m = _EMBEDDED_SOURCE_MARKERS_RE.match(s)
     if not m:
-        return None, s
+        return None, None, s
     try:
-        return int(m.group(1)), s[m.end() :]
+        chat_id = int(m.group(1))
     except Exception:  # noqa: BLE001
-        return None, s
+        chat_id = None
+    try:
+        topic_id = int(m.group(2)) if m.group(2) else None
+    except Exception:  # noqa: BLE001
+        topic_id = None
+    return chat_id, topic_id, s[m.end() :]
 
 
 def normalize_forum_topic_title(value: str) -> str:
@@ -394,12 +402,31 @@ class RelayBot:
                 hint="Topics are configured via topic_title, but relay.forum_topic_ids is empty. Relay will try to resolve topics by title, but this is commonly restricted for bot accounts. Populate relay.forum_topic_ids (scripts/export_forum_topic_ids.py --write) or set destinations[].topic_id for reliable routing.",
             )
 
-    def resolve_destinations(self, source_chat_id: int | None, *, seed: int | None = None) -> list[dict[str, Any]]:
+    def resolve_destinations(
+        self,
+        source_chat_id: int | None,
+        *,
+        source_topic_id: int | None = None,
+        seed: int | None = None,
+    ) -> list[dict[str, Any]]:
         settings = self.current_settings()
         source_chat_id = int(source_chat_id or 0)
+        source_topic_id = int(source_topic_id) if source_topic_id is not None else None
 
-        for r in settings.get("routes", []) or []:
-            if source_chat_id in (r.get("source_chats") or []):
+        routes = settings.get("routes", []) or []
+
+        # Prefer topic-specific routes when we have a source_topic_id.
+        if source_topic_id is not None:
+            for r in routes:
+                if source_chat_id not in (r.get("source_chats") or []):
+                    continue
+                topics = r.get("source_topics") or []
+                if topics and source_topic_id in topics:
+                    return list(r.get("destinations") or [])
+
+        # Fall back to chat-level routes.
+        for r in routes:
+            if source_chat_id in (r.get("source_chats") or []) and not (r.get("source_topics") or []):
                 return list(r.get("destinations") or [])
 
         if settings.get("distribute_unrouted_to_buckets") and settings.get("general_topic_buckets"):
@@ -697,6 +724,153 @@ class RelayBot:
             )
             return None
 
+    def _parse_destinations_tokens(self, tokens: list[str]) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for tok in tokens:
+            if not tok:
+                continue
+            if "@" in tok:
+                chat_str, topic_str = tok.split("@", 1)
+                out.append({"chat_id": int(chat_str), "topic_id": int(topic_str)})
+                continue
+            if "=" in tok:
+                chat_str, title = tok.split("=", 1)
+                out.append({"chat_id": int(chat_str), "topic_title": title.strip()})
+                continue
+            out.append({"chat_id": int(tok)})
+        return out
+
+    def _format_destinations(self, destinations: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for d in destinations or []:
+            chat_id = d.get("chat_id")
+            if d.get("topic_id") is not None:
+                parts.append(f"{chat_id}@{d.get('topic_id')}")
+            elif d.get("topic_title"):
+                parts.append(f"{chat_id}=\"{d.get('topic_title')}\"")
+            else:
+                parts.append(str(chat_id))
+        return " ".join(parts)
+
+    def _save_config_and_reload(self, cfg: dict[str, Any]) -> None:
+        self.config_manager.save(cfg)
+        self.settings = load_relay_settings(self.config_manager)
+        self._maybe_log_topic_config_warning(self.settings)
+
+    async def _handle_command(self, event, stripped_text: str) -> None:
+        cmd, args = parse_command(stripped_text)
+
+        if cmd in {"/help", "/start"}:
+            await event.reply(
+                "🤖 RelayBot commands:\n"
+                "/list_routes\n"
+                "/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
+                "/remove_route <index>\n"
+                "/set_destinations <index> <dest...>\n"
+            )
+            return
+
+        if cmd == "/list_routes":
+            cfg = self.config_manager.load(force=True)
+            relay = cfg.get("relay", {}) or {}
+            routes = relay.get("routes", []) or []
+            if not routes:
+                await event.reply("🤖 routes 为空")
+                return
+
+            lines: list[str] = []
+            for i, r in enumerate(routes, start=1):
+                src = ",".join(str(x) for x in (r.get("source_chats") or []))
+                topics = r.get("source_topics") or []
+                topic_str = f" topics={','.join(str(x) for x in topics)}" if topics else ""
+                dest = self._format_destinations(r.get("destinations") or [])
+                lines.append(f"{i}) {src}{topic_str} -> {dest}")
+
+            await event.reply("🤖 Routes:\n" + "\n".join(lines[:50]))
+            return
+
+        if cmd == "/add_route":
+            tokens = shlex.split(args or "")
+            if len(tokens) < 2:
+                await event.reply("🤖 用法: /add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...")
+                return
+
+            source_chats = [int(x) for x in tokens[0].split(",") if x.strip()]
+            source_topic_id = None
+            dest_tokens: list[str] = []
+            for t in tokens[1:]:
+                if t.startswith("source_topic=") or t.startswith("topic="):
+                    source_topic_id = int(t.split("=", 1)[1])
+                    continue
+                dest_tokens.append(t)
+
+            destinations = self._parse_destinations_tokens(dest_tokens)
+            if not destinations:
+                await event.reply("🤖 错误: destinations 为空")
+                return
+
+            cfg = self.config_manager.load(force=True)
+            cfg.setdefault("relay", {})
+            relay = cfg.get("relay", {}) or {}
+            routes = list(relay.get("routes", []) or [])
+
+            new_route: dict[str, Any] = {"source_chats": source_chats, "destinations": destinations}
+            if source_topic_id is not None:
+                new_route["source_topics"] = [int(source_topic_id)]
+
+            routes.append(new_route)
+            relay["routes"] = routes
+            cfg["relay"] = relay
+            self._save_config_and_reload(cfg)
+            await event.reply("🤖 已添加 route")
+            return
+
+        if cmd == "/remove_route":
+            tokens = shlex.split(args or "")
+            if len(tokens) != 1:
+                await event.reply("🤖 用法: /remove_route <index>")
+                return
+
+            idx = int(tokens[0]) - 1
+            cfg = self.config_manager.load(force=True)
+            relay = cfg.get("relay", {}) or {}
+            routes = list(relay.get("routes", []) or [])
+            if idx < 0 or idx >= len(routes):
+                await event.reply("🤖 错误: index 超出范围")
+                return
+
+            routes.pop(idx)
+            relay["routes"] = routes
+            cfg["relay"] = relay
+            self._save_config_and_reload(cfg)
+            await event.reply("🤖 已移除 route")
+            return
+
+        if cmd == "/set_destinations":
+            tokens = shlex.split(args or "")
+            if len(tokens) < 2:
+                await event.reply("🤖 用法: /set_destinations <index> <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...")
+                return
+
+            idx = int(tokens[0]) - 1
+            destinations = self._parse_destinations_tokens(tokens[1:])
+
+            cfg = self.config_manager.load(force=True)
+            relay = cfg.get("relay", {}) or {}
+            routes = list(relay.get("routes", []) or [])
+            if idx < 0 or idx >= len(routes):
+                await event.reply("🤖 错误: index 超出范围")
+                return
+
+            routes[idx]["destinations"] = destinations
+            relay["routes"] = routes
+            cfg["relay"] = relay
+            self._save_config_and_reload(cfg)
+            await event.reply("🤖 已更新 destinations")
+            return
+
+        await event.reply("🤖 未知命令。发送 /help 查看用法")
+
     async def handle(self, event) -> None:
         settings = self.current_settings()
 
@@ -716,7 +890,7 @@ class RelayBot:
 
         stripped_text = (getattr(event, "raw_text", "") or "").strip()
         if stripped_text.startswith("/"):
-            log_event(self.logger, logging.INFO, "command_blocked", text=stripped_text)
+            await self._handle_command(event, stripped_text)
             return
         if stripped_text.startswith("🤖"):
             log_event(self.logger, logging.INFO, "system_reply_blocked", text=stripped_text)
@@ -728,18 +902,25 @@ class RelayBot:
                 key = (event.chat_id, msg.grouped_id)
                 if key not in self.media_group_cache:
                     source_chat_id = _extract_forward_source_chat_id(msg)
+                    embedded_chat, embedded_topic, _ = _extract_embedded_source_markers_and_strip(getattr(msg, "raw_text", "") or "")
                     if source_chat_id is None:
-                        embedded, _ = _extract_embedded_source_chat_id_and_strip(getattr(msg, "raw_text", "") or "")
-                        source_chat_id = embedded
-                    self.media_group_cache[key] = {"messages": [], "task": None, "source_chat_id": source_chat_id}
+                        source_chat_id = embedded_chat
+                    self.media_group_cache[key] = {
+                        "messages": [],
+                        "task": None,
+                        "source_chat_id": source_chat_id,
+                        "source_topic_id": embedded_topic,
+                    }
+
                 self.media_group_cache[key]["messages"].append(msg)
                 task = self.media_group_cache[key].get("task")
                 if task:
                     task.cancel()
                 self.media_group_cache[key]["task"] = asyncio.create_task(self.process_media_group(key))
             log_event(self.logger, logging.INFO, "album_cached", group_id=msg.grouped_id)
-        else:
-            await self.send_copy(msg)
+            return
+
+        await self.send_copy(msg)
 
     async def process_media_group(self, key: tuple[int, int]) -> None:
         try:
@@ -748,6 +929,7 @@ class RelayBot:
                 if key not in self.media_group_cache:
                     return
                 source_chat_id = self.media_group_cache[key].get("source_chat_id")
+                source_topic_id = self.media_group_cache[key].get("source_topic_id")
                 msgs = self.media_group_cache[key]["messages"]
                 del self.media_group_cache[key]
 
@@ -761,9 +943,11 @@ class RelayBot:
                 ),
                 None,
             )
-            embedded_source, caption = _extract_embedded_source_chat_id_and_strip(caption_raw or "")
+            embedded_chat, embedded_topic, caption = _extract_embedded_source_markers_and_strip(caption_raw or "")
             if source_chat_id is None:
-                source_chat_id = embedded_source
+                source_chat_id = embedded_chat
+            if source_topic_id is None:
+                source_topic_id = embedded_topic
 
             _, gid = key
             caption_for_blocking = caption
@@ -797,7 +981,7 @@ class RelayBot:
                 )
                 return
 
-            for dest in self.resolve_destinations(source_chat_id, seed=gid):
+            for dest in self.resolve_destinations(source_chat_id, source_topic_id=source_topic_id, seed=gid):
                 chat_id = int(dest["chat_id"])
                 topic_title = dest.get("topic_title")
 
@@ -889,8 +1073,9 @@ class RelayBot:
     async def send_copy(self, msg) -> None:
         forward_source = _extract_forward_source_chat_id(msg)
         original_text = getattr(msg, "raw_text", "") or ""
-        embedded_source, stripped_original_text = _extract_embedded_source_chat_id_and_strip(original_text)
-        source_chat_id = forward_source if forward_source is not None else embedded_source
+        embedded_chat, embedded_topic, stripped_original_text = _extract_embedded_source_markers_and_strip(original_text)
+        source_chat_id = forward_source if forward_source is not None else embedded_chat
+        source_topic_id = embedded_topic
 
         # We use the original text for tweet URL detection even if strip_text is enabled.
         display_text = stripped_original_text
@@ -928,7 +1113,7 @@ class RelayBot:
                 )
                 return
 
-            for dest in self.resolve_destinations(source_chat_id, seed=msg.id):
+            for dest in self.resolve_destinations(source_chat_id, source_topic_id=source_topic_id, seed=msg.id):
                 chat_id = int(dest["chat_id"])
                 topic_title = dest.get("topic_title")
 
