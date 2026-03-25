@@ -475,15 +475,128 @@ async def _cmd_list_routes(event):
         await event.reply("🤖 routes 为空")
         return
 
-    lines: list[str] = []
-    for i, r in enumerate(routes, start=1):
-        src = ",".join(str(x) for x in (r.get("source_chats") or []))
-        topics = r.get("source_topics") or []
-        topic_str = f" topics={','.join(str(x) for x in topics)}" if topics else ""
-        dest = _format_destinations(r.get("destinations") or [])
-        lines.append(f"{i}) {src}{topic_str} -> {dest}")
+    entity_cache: dict[int, object] = {}
+    topic_title_cache: dict[tuple[int, int], str] = {}
 
-    await event.reply("🤖 Routes:\n" + "\n".join(lines[:50]))
+    async def _get_entity(chat_id: int):
+        if chat_id in entity_cache:
+            return entity_cache[chat_id]
+        ent = await client.get_entity(chat_id)
+        entity_cache[chat_id] = ent
+        return ent
+
+    def _entity_label(ent) -> str:
+        title = getattr(ent, "title", None)
+        username = getattr(ent, "username", None)
+        if title and username:
+            return f"{title} (@{username})"
+        if title:
+            return str(title)
+        if username:
+            return f"@{username}"
+        return str(getattr(ent, "id", ""))
+
+    async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
+        if top_message_id == 1:
+            return "General"
+
+        key = (chat_id, top_message_id)
+        if key in topic_title_cache:
+            return topic_title_cache[key]
+
+        ent = await _get_entity(chat_id)
+        msg = await client.get_messages(ent, ids=int(top_message_id))
+        if not msg:
+            return None
+
+        action = getattr(msg, "action", None)
+        title = getattr(action, "title", None)
+        if not title:
+            return None
+
+        topic_title_cache[key] = str(title)
+        return str(title)
+
+    out: list[str] = ["🤖 Routes:"]
+
+    for i, r in enumerate(routes, start=1):
+        out.append(f"\n{i})")
+
+        source_chats = [int(x) for x in (r.get("source_chats") or [])]
+        source_topics = [int(x) for x in (r.get("source_topics") or [])]
+        destinations = list(r.get("destinations") or [])
+
+        out.append("  Sources:")
+        for cid in source_chats:
+            try:
+                ent = await _get_entity(cid)
+                out.append(f"    - {cid} | {_entity_label(ent)}")
+            except Exception:  # noqa: BLE001
+                out.append(f"    - {cid}")
+
+            if source_topics:
+                topic_parts: list[str] = []
+                for tid in source_topics:
+                    try:
+                        title = await _topic_title(cid, tid)
+                    except Exception:  # noqa: BLE001
+                        title = None
+                    if title:
+                        topic_parts.append(f"{tid} | {title}")
+                    else:
+                        topic_parts.append(str(tid))
+                out.append("      topics: " + "; ".join(topic_parts))
+            else:
+                try:
+                    ent = entity_cache.get(cid) or await _get_entity(cid)
+                    if getattr(ent, "forum", False):
+                        out.append("      topics: ALL")
+                except Exception:  # noqa: BLE001
+                    pass
+
+        out.append("  Destinations:")
+        for d in destinations:
+            chat_id = int(d.get("chat_id"))
+            chat_label = None
+            try:
+                ent = await _get_entity(chat_id)
+                chat_label = _entity_label(ent)
+            except Exception:  # noqa: BLE001
+                chat_label = None
+
+            line = f"    - {chat_id}"
+            if chat_label:
+                line += f" | {chat_label}"
+
+            if d.get("topic_id") is not None:
+                topic_id = int(d.get("topic_id"))
+                topic_label = None
+                try:
+                    topic_label = await _topic_title(chat_id, topic_id)
+                except Exception:  # noqa: BLE001
+                    topic_label = None
+
+                line += f" | topic_id={topic_id}"
+                if topic_label:
+                    line += f" | {topic_label}"
+            elif d.get("topic_title"):
+                line += f" | topic_title=\"{d.get('topic_title')}\""
+
+            out.append(line)
+
+    text = "\n".join(out)
+    if len(text) <= 3500:
+        await event.reply(text)
+        return
+
+    tmp = tempfile.TemporaryDirectory(prefix="routes_")
+    try:
+        path = f"{tmp.name}/routes.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        await client.send_file(event.chat_id, path, caption="🤖 Routes 太长，已导出为文件")
+    finally:
+        tmp.cleanup()
 
 
 def _save_routes(routes: list[dict]) -> None:
