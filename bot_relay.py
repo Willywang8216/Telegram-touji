@@ -39,15 +39,8 @@ DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 _MAX_LINKS = 3
 
+_IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
-
-_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
-_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
-</old_code><new_code>_IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-_VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
-
-_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
-_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}</old_code><new_code>_VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
 
 _DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
 _DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
