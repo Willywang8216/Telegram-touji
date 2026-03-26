@@ -59,7 +59,16 @@
     "unrouted_distribution_mode": "source",
     "general_topic_buckets": {
       "-1009876543210": ["Bucket 1", "Bucket 2", "Bucket 3", "Bucket 4", "Bucket 5"]
-    }
+    },
+
+    "blocklist_substrings": [
+      "正品",
+      "正版",
+      "高仿",
+      "水果",
+      "手機",
+      "emby"
+    ]
   },
   "proxy": null
 }

@@ -602,9 +602,18 @@ class RelayBot:
         captions = self.current_settings().get("post_captions", {}) or {}
         return captions.get(int(chat_id))
 
+    _EXTRA_BLOCKLIST_SUBSTRINGS = [
+        "正品",
+        "正版",
+        "高仿",
+        "水果",
+        "手機",
+        "emby",
+    ]
+
     def _is_blocked(self, text: str) -> bool:
         hay = str(text or "").casefold()
-        for s in self.current_settings().get("blocklist_substrings", []) or []:
+        for s in (self.current_settings().get("blocklist_substrings", []) or []) + self._EXTRA_BLOCKLIST_SUBSTRINGS:
             if not s:
                 continue
             if str(s).casefold() in hay:
@@ -619,8 +628,69 @@ class RelayBot:
     def _has_too_many_links(self, text: str | None) -> bool:
         return self._count_links(text) > _MAX_LINKS
 
+    def _is_link_only(self, text: str | None) -> bool:
+        s = str(text or "").strip()
+        if not s:
+            return False
+        rest = _URL_RE.sub(" ", s)
+        rest = re.sub(r"[\s\-–—.,;:!?()\[\]{}<>\"'“”‘’]+", " ", rest)
+        return not rest.strip()
+
+    def _document_meta_text(self, msg) -> str:
+        parts: list[str] = []
+
+        doc = getattr(msg, "document", None)
+        if doc is not None:
+            mime = str(getattr(doc, "mime_type", "") or "")
+            if mime:
+                parts.append(mime)
+            for attr in getattr(doc, "attributes", []) or []:
+                fn = getattr(attr, "file_name", None)
+                if fn:
+                    parts.append(str(fn))
+                alt = getattr(attr, "alt", None)
+                if alt:
+                    parts.append(str(alt))
+                title = getattr(attr, "title", None)
+                if title:
+                    parts.append(str(title))
+                performer = getattr(attr, "performer", None)
+                if performer:
+                    parts.append(str(performer))
+
+        media = getattr(msg, "media", None)
+        wp = getattr(media, "webpage", None)
+        if wp is not None:
+            for k in ("url", "site_name", "title", "description"):
+                v = getattr(wp, k, None)
+                if v:
+                    parts.append(str(v))
+
+        return "\n".join([p for p in parts if str(p).strip()])
+
+    def _filter_haystack(self, msg, stripped_original_text: str) -> str:
+        parts = [stripped_original_text]
+        meta = self._document_meta_text(msg)
+        if meta:
+            parts.append(meta)
+        return "\n".join([p for p in parts if str(p).strip()])
+
+    def _is_gif_or_sticker(self, msg) -> bool:
+        if getattr(msg, "gif", None) is not None:
+            return True
+        if getattr(msg, "sticker", None) is not None:
+            return True
+
+        doc = getattr(msg, "document", None)
+        for attr in getattr(doc, "attributes", []) or []:
+            if isinstance(attr, types.DocumentAttributeSticker):
+                return True
+            if isinstance(attr, types.DocumentAttributeAnimated):
+                return True
+        return False
+
     def _is_video_message(self, msg) -> bool:
-        return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None) or getattr(msg, "gif", None))
+        return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
 
     def _is_photo_message(self, msg) -> bool:
         if getattr(msg, "photo", None) is not None:
@@ -642,6 +712,9 @@ class RelayBot:
         return ext in _IMAGE_FILE_EXTS
 
     def _should_relay_single(self, msg, *, uploadable_media: bool, expanded: ExpandedMedia | None) -> tuple[bool, str]:
+        if self._is_gif_or_sticker(msg):
+            return False, "gif_or_sticker"
+
         if uploadable_media:
             if self._is_video_message(msg):
                 return True, "video"
@@ -663,6 +736,9 @@ class RelayBot:
         return False, "text_only"
 
     def _should_relay_album(self, msgs: list[Any]) -> tuple[bool, str]:
+        if any(self._is_gif_or_sticker(m) for m in msgs):
+            return False, "gif_or_sticker"
+
         if any(self._is_video_message(m) for m in msgs):
             return True, "video"
 
@@ -1155,6 +1231,49 @@ class RelayBot:
             _, gid = key
             caption_for_blocking = caption
 
+            meta_parts = [self._document_meta_text(m) for m in msgs]
+            filter_text = "\n".join([p for p in [caption_for_blocking, *meta_parts] if str(p).strip()])
+
+            if filter_text and self._is_blocked(filter_text):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_blocked",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
+            if any(self._is_gif_or_sticker(m) for m in msgs):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_gif_or_sticker",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
+            if any(getattr(m, "media", None) for m in msgs) and not str(caption_for_blocking or "").strip():
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_attachment_only",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
+            if self._is_link_only(caption_for_blocking) and not extract_tweet_urls(caption_for_blocking or ""):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_link_only",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
             if self._has_too_many_links(caption_for_blocking):
                 log_event(
                     self.logger,
@@ -1302,6 +1421,59 @@ class RelayBot:
         expanded: ExpandedMedia | None = None
         if not uploadable_media:
             expanded = await self._maybe_expand_twitter_media(stripped_original_text)
+
+        filter_haystack = self._filter_haystack(msg, stripped_original_text)
+        if expanded is not None:
+            names = [Path(str(p)).name for p in (expanded.files or [])]
+            extra = "\n".join([n for n in names if str(n).strip()])
+            if extra:
+                filter_haystack = (filter_haystack + "\n" if filter_haystack else "") + extra
+
+        if filter_haystack and self._is_blocked(filter_haystack):
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_blocked",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            if expanded is not None:
+                expanded.cleanup()
+            return
+
+        if self._is_gif_or_sticker(msg):
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_gif_or_sticker",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            if expanded is not None:
+                expanded.cleanup()
+            return
+
+        if (uploadable_media or expanded is not None) and not stripped_original_text.strip():
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_attachment_only",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            if expanded is not None:
+                expanded.cleanup()
+            return
+
+        if self._is_link_only(stripped_original_text) and not extract_tweet_urls(stripped_original_text) and expanded is None:
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_link_only",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            return
 
         try:
             should_relay, reason = self._should_relay_single(msg, uploadable_media=uploadable_media, expanded=expanded)

@@ -49,6 +49,8 @@ class FakeMessage:
         photo=None,
         video=None,
         gif=None,
+        sticker=None,
+        document=None,
         round_video=None,
         video_note=None,
     ):
@@ -60,6 +62,8 @@ class FakeMessage:
         self.photo = photo
         self.video = video
         self.gif = gif
+        self.sticker = sticker
+        self.document = document
         self.round_video = round_video
         self.video_note = video_note
 
@@ -122,6 +126,86 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
 
+    async def test_video_link_only_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="https://a.com", video="VIDEO")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_attachment_only_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_gif_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", gif="GIF")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_sticker_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", sticker="STICKER")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_blocklist_applies_to_attachment_metadata(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        class FakeDoc:
+            def __init__(self):
+                self.mime_type = "application/octet-stream"
+                self.attributes = [types.DocumentAttributeFilename(file_name="emby_pack.zip")]
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", document=FakeDoc())
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_too_many_links_is_skipped_even_for_video(self):
         client = FakeClient()
         bot = RelayBot(
@@ -154,7 +238,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         key = (1, 99)
         bot.media_group_cache[key] = {
             "messages": [
-                FakeMessage(message_id=1, grouped_id=99, media="M1", photo="PHOTO"),
+                FakeMessage(message_id=1, grouped_id=99, media="M1", raw_text="cap", photo="PHOTO"),
                 FakeMessage(message_id=2, grouped_id=99, media="M2", photo="PHOTO"),
             ],
             "task": None,
@@ -167,7 +251,7 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         with patch("bot_relay.asyncio.sleep", new=no_sleep):
             await bot.process_media_group(key)
 
-        self.assertEqual(client.calls, [("send_file", -100, ["M1", "M2"], None, None)])
+        self.assertEqual(client.calls, [("send_file", -100, ["M1", "M2"], "cap", None)])
 
     async def test_album_single_photo_is_skipped(self):
         client = FakeClient()

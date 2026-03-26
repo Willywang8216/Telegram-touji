@@ -4,7 +4,7 @@ import re
 import shlex
 import tempfile
 
-from telethon import TelegramClient, functions, utils
+from telethon import TelegramClient, functions, types, utils
 from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MessageIdInvalidError
 from telethon.events import NewMessage
 from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelRequest
@@ -13,6 +13,7 @@ from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from telegram_link_utils import looks_like_message_link, parse_message_link
+from twitter_expand import extract_tweet_urls
 
 try:
     from structured_logger import get_logger, log_event
@@ -53,7 +54,7 @@ _URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 def _is_blocked(text: str) -> bool:
     hay = str(text or "").casefold()
-    for s in blocklist_substrings or []:
+    for s in (blocklist_substrings or []) + _EXTRA_BLOCKLIST_SUBSTRINGS:
         if not s:
             continue
         if str(s).casefold() in hay:
@@ -71,11 +72,100 @@ def _has_too_many_links(text: str | None) -> bool:
     return _count_links(text) > _MAX_LINKS
 
 
+def _is_link_only(text: str | None) -> bool:
+    s = str(text or "").strip()
+    if not s:
+        return False
+    rest = _URL_RE.sub(" ", s)
+    rest = re.sub(r"[\s\-–—.,;:!?()\[\]{}<>\"'“”‘’]+", " ", rest)
+    return not rest.strip()
+
+
+def _document_meta_text(msg) -> str:
+    parts: list[str] = []
+    doc = getattr(msg, "document", None)
+    if doc is not None:
+        mime = str(getattr(doc, "mime_type", "") or "")
+        if mime:
+            parts.append(mime)
+        for attr in getattr(doc, "attributes", []) or []:
+            fn = getattr(attr, "file_name", None)
+            if fn:
+                parts.append(str(fn))
+            alt = getattr(attr, "alt", None)
+            if alt:
+                parts.append(str(alt))
+            title = getattr(attr, "title", None)
+            if title:
+                parts.append(str(title))
+            performer = getattr(attr, "performer", None)
+            if performer:
+                parts.append(str(performer))
+
+    media = getattr(msg, "media", None)
+    wp = getattr(media, "webpage", None)
+    if wp is not None:
+        for k in ("url", "site_name", "title", "description"):
+            v = getattr(wp, k, None)
+            if v:
+                parts.append(str(v))
+
+    return "\n".join([p for p in parts if str(p).strip()])
+
+
+def _filter_haystack(msg_text: str, msg) -> str:
+    parts = [msg_text]
+    meta = _document_meta_text(msg)
+    if meta:
+        parts.append(meta)
+    return "\n".join([p for p in parts if str(p).strip()])
+
+
+def _is_gif_or_sticker(msg) -> bool:
+    if getattr(msg, "gif", None) is not None:
+        return True
+    if getattr(msg, "sticker", None) is not None:
+        return True
+
+    doc = getattr(msg, "document", None)
+    for attr in getattr(doc, "attributes", []) or []:
+        if isinstance(attr, types.DocumentAttributeSticker):
+            return True
+        if isinstance(attr, types.DocumentAttributeAnimated):
+            return True
+    return False
+
+
+def _is_video_message(msg) -> bool:
+    return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
+
+
+def _is_photo_message(msg) -> bool:
+    if getattr(msg, "photo", None) is not None:
+        return True
+
+    doc = getattr(msg, "document", None)
+    mime = str(getattr(doc, "mime_type", "") or "")
+    if mime.startswith("image/") and not _is_video_message(msg):
+        return True
+
+    return False
+
+
 # Prefix used when we cannot forward (e.g. protected content / noforwards) or when we need
 # to preserve routing metadata (source chat/topic) across a copy.
 # Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
 _SOURCE_CHAT_ID_MARKER_PREFIX = "\u2063SRC_CHAT_ID="
 _SOURCE_TOPIC_ID_MARKER_PREFIX = "\u2063SRC_TOPIC_ID="
+
+_EXTRA_BLOCKLIST_SUBSTRINGS = [
+    "正品",
+    "正版",
+    "高仿",
+    "水果",
+    "手機",
+    "emby",
+]
 
 
 def _with_source_marker(source_chat_id: int, source_topic_id: int | None, text: str | None) -> str:
@@ -251,6 +341,63 @@ async def handler(event):
         return
 
     msg_text = getattr(event.message, "raw_text", "") or ""
+    filter_haystack = _filter_haystack(msg_text, event.message)
+
+    is_gif_or_sticker = _is_gif_or_sticker(event.message)
+    is_blocked = bool(filter_haystack and _is_blocked(filter_haystack))
+    too_many_links = _has_too_many_links(msg_text)
+
+    if not event.message.grouped_id:
+        if is_gif_or_sticker:
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_gif_or_sticker",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if getattr(event.message, "media", None) is not None and not msg_text.strip():
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_attachment_only",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if _is_link_only(msg_text) and not extract_tweet_urls(msg_text):
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_link_only",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if _is_photo_message(event.message):
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_single_image",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if is_blocked or too_many_links:
+            log_event(
+                logger,
+                logging.INFO,
+                "message_blocked",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+                links=_count_links(msg_text) if too_many_links else None,
+            )
+            return
 
     noforwards = bool(getattr(event.message, "noforwards", False))
     if not noforwards:
@@ -278,24 +425,13 @@ async def handler(event):
             elif media_group_cache[key].get("source_topic_id") is None and source_topic_id is not None:
                 media_group_cache[key]["source_topic_id"] = source_topic_id
 
-            if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
+            if is_gif_or_sticker or is_blocked or too_many_links:
                 media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
             if media_group_cache[key]["task"]:
                 media_group_cache[key]["task"].cancel()
             media_group_cache[key]["task"] = asyncio.create_task(process_media_group(key))
-        return
-
-    if msg_text and (_is_blocked(msg_text) or _has_too_many_links(msg_text)):
-        log_event(
-            logger,
-            logging.INFO,
-            "message_blocked",
-            chat_id=str(event.chat_id),
-            message_id=getattr(event.message, "id", None),
-            links=_count_links(msg_text) if _has_too_many_links(msg_text) else None,
-        )
         return
 
     await safe_forward_single(
@@ -334,7 +470,23 @@ async def process_media_group(key: tuple[int, int]):
         ),
         "",
     )
-    if caption_check and (_is_blocked(caption_check) or _has_too_many_links(caption_check)):
+
+    meta_parts = [_document_meta_text(m) for m in msgs]
+    filter_text = "\n".join([p for p in [caption_check, *meta_parts] if str(p).strip()])
+
+    if any(_is_gif_or_sticker(m) for m in msgs):
+        log_event(logger, logging.INFO, "group_skipped_gif_or_sticker", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    if any(getattr(m, "media", None) is not None for m in msgs) and not str(caption_check or "").strip():
+        log_event(logger, logging.INFO, "group_skipped_attachment_only", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    if _is_link_only(caption_check) and not extract_tweet_urls(caption_check or ""):
+        log_event(logger, logging.INFO, "group_skipped_link_only", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    if filter_text and (_is_blocked(filter_text) or _has_too_many_links(caption_check)):
         log_event(
             logger,
             logging.INFO,
@@ -347,6 +499,12 @@ async def process_media_group(key: tuple[int, int]):
 
     source_topic_id = data.get("source_topic_id")
     force_copy = source_topic_id is not None
+
+    if not any(_is_video_message(m) for m in msgs):
+        photo_count = sum(1 for m in msgs if _is_photo_message(m))
+        if photo_count == 1:
+            log_event(logger, logging.INFO, "group_skipped_single_image", chat_id=str(from_peer), group_id=grouped_id)
+            return
 
     try:
         if data.get("noforwards") or force_copy:
