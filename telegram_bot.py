@@ -50,11 +50,47 @@ blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("block
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
 _MAX_LINKS = 3
+_MIN_VIDEO_DURATION_SECONDS = 5
 
 _DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
 _DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
 
 _URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
+
+
+def _compute_ignored_source_chats(cfg: dict) -> set[int]:
+    relay = cfg.get("relay", {}) or {}
+    out: set[int] = set()
+
+    for x in relay.get("dest_channels", []) or []:
+        try:
+            out.add(int(x))
+        except Exception:  # noqa: BLE001
+            continue
+
+    for d in relay.get("default_destinations", []) or []:
+        try:
+            out.add(int(d.get("chat_id")))
+        except Exception:  # noqa: BLE001
+            continue
+
+    for r in relay.get("routes", []) or []:
+        for d in r.get("destinations", []) or []:
+            try:
+                out.add(int(d.get("chat_id")))
+            except Exception:  # noqa: BLE001
+                continue
+
+    for x in relay.get("ignore_source_chats", []) or []:
+        try:
+            out.add(int(x))
+        except Exception:  # noqa: BLE001
+            continue
+
+    return out
+
+
+ignored_source_chats = _compute_ignored_source_chats(config_manager.load())
 
 
 def _is_blocked(text: str) -> bool:
@@ -143,6 +179,28 @@ def _is_gif_or_sticker(msg) -> bool:
 
 def _is_video_message(msg) -> bool:
     return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
+
+
+def _video_duration_seconds(msg) -> int | None:
+    doc = getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None)
+    if doc is None:
+        doc = getattr(msg, "document", None)
+
+    for attr in getattr(doc, "attributes", []) or []:
+        if isinstance(attr, types.DocumentAttributeVideo):
+            try:
+                return int(getattr(attr, "duration", 0) or 0)
+            except Exception:  # noqa: BLE001
+                return None
+
+    return None
+
+
+def _is_short_video(msg) -> bool:
+    if not _is_video_message(msg):
+        return False
+    dur = _video_duration_seconds(msg)
+    return dur is not None and dur < _MIN_VIDEO_DURATION_SECONDS
 
 
 def _is_photo_message(msg) -> bool:
@@ -354,12 +412,21 @@ async def safe_forward_single(
 
 @client.on(NewMessage())
 async def handler(event):
+    if getattr(event, "out", False) or getattr(getattr(event, "message", None), "out", False):
+        return
+
     if config_manager.reload_if_changed():
-        global bot_mappings, blocklist_substrings
+        global bot_mappings, blocklist_substrings, ignored_source_chats
         bot_mappings = load_userbot_settings(config_manager)["bot_mappings"]
-        blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("blocklist_substrings", []) or []
+        cfg = config_manager.load()
+        blocklist_substrings = (cfg.get("relay", {}) or {}).get("blocklist_substrings", []) or []
+        ignored_source_chats = _compute_ignored_source_chats(cfg)
         await rebuild_forwarding_map()
         log_event(logger, logging.INFO, "config_hot_reloaded")
+
+    if event.chat_id is not None and int(event.chat_id) in ignored_source_chats:
+        log_event(logger, logging.INFO, "message_skipped_ignored_source", chat_id=str(event.chat_id))
+        return
 
     target_bot = forwarding_map.get(event.chat_id)
     if not target_bot:
@@ -372,6 +439,7 @@ async def handler(event):
     is_disallowed_doc = _is_disallowed_document(event.message)
     is_blocked = bool(filter_haystack and _is_blocked(filter_haystack))
     too_many_links = _has_too_many_links(msg_text)
+    is_short_video = _is_short_video(event.message)
 
     if not event.message.grouped_id:
         if is_gif_or_sticker:
@@ -391,6 +459,17 @@ async def handler(event):
                 "message_skipped_disallowed_document",
                 chat_id=str(event.chat_id),
                 message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if is_short_video:
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_short_video",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+                duration=_video_duration_seconds(event.message),
             )
             return
 
@@ -516,6 +595,16 @@ async def process_media_group(key: tuple[int, int]):
 
     if any(_is_disallowed_document(m) for m in msgs):
         log_event(logger, logging.INFO, "group_skipped_disallowed_document", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    if any(_is_short_video(m) for m in msgs):
+        log_event(
+            logger,
+            logging.INFO,
+            "group_skipped_short_video",
+            chat_id=str(from_peer),
+            group_id=grouped_id,
+        )
         return
 
     if any(getattr(m, "media", None) is not None for m in msgs) and not str(caption_check or "").strip():

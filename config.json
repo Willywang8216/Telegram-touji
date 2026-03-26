@@ -325,7 +325,14 @@
 
     "forum_topic_ids": {},
 
-    "blocklist_substrings": []
+    "blocklist_substrings": [
+      "正品",
+      "正版",
+      "高仿",
+      "水果",
+      "手機",
+      "emby"
+    ]
   },
   "proxy": null
 }

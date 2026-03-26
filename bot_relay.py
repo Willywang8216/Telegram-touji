@@ -38,6 +38,7 @@ except ModuleNotFoundError:  # pragma: no cover
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 _MAX_LINKS = 3
+_MIN_VIDEO_DURATION_SECONDS = 5
 
 _IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
@@ -456,6 +457,37 @@ class RelayBot:
 
         return [{"chat_id": int(x)} for x in settings.get("dest_channels", [])]
 
+    def _ignored_source_chats(self) -> set[int]:
+        settings = self.current_settings()
+        out: set[int] = set()
+
+        for x in settings.get("ignore_source_chats", []) or []:
+            try:
+                out.add(int(x))
+            except Exception:  # noqa: BLE001
+                continue
+
+        for x in settings.get("dest_channels", []) or []:
+            try:
+                out.add(int(x))
+            except Exception:  # noqa: BLE001
+                continue
+
+        for d in settings.get("default_destinations", []) or []:
+            try:
+                out.add(int(d.get("chat_id")))
+            except Exception:  # noqa: BLE001
+                continue
+
+        for r in settings.get("routes", []) or []:
+            for d in r.get("destinations", []) or []:
+                try:
+                    out.add(int(d.get("chat_id")))
+                except Exception:  # noqa: BLE001
+                    continue
+
+        return out
+
     async def _resolve_reply_to(self, chat_id: int, topic_title: str | None, *, explicit_topic_id: int | None = None) -> int | None:
         if explicit_topic_id is not None:
             try:
@@ -714,6 +746,26 @@ class RelayBot:
     def _is_video_message(self, msg) -> bool:
         return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
 
+    def _video_duration_seconds(self, msg) -> int | None:
+        doc = getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None)
+        if doc is None:
+            doc = getattr(msg, "document", None)
+
+        for attr in getattr(doc, "attributes", []) or []:
+            if isinstance(attr, types.DocumentAttributeVideo):
+                try:
+                    return int(getattr(attr, "duration", 0) or 0)
+                except Exception:  # noqa: BLE001
+                    return None
+
+        return None
+
+    def _is_short_video(self, msg) -> bool:
+        if not self._is_video_message(msg):
+            return False
+        dur = self._video_duration_seconds(msg)
+        return dur is not None and dur < _MIN_VIDEO_DURATION_SECONDS
+
     def _is_photo_message(self, msg) -> bool:
         if getattr(msg, "photo", None) is not None:
             return True
@@ -741,6 +793,8 @@ class RelayBot:
 
         if uploadable_media:
             if self._is_video_message(msg):
+                if self._is_short_video(msg):
+                    return False, "short_video"
                 return True, "video"
             if self._is_photo_message(msg):
                 return False, "single_photo"
@@ -766,6 +820,8 @@ class RelayBot:
             return False, "disallowed_document"
 
         if any(self._is_video_message(m) for m in msgs):
+            if any(self._is_short_video(m) for m in msgs if self._is_video_message(m)):
+                return False, "short_video"
             return True, "video"
 
         photo_count = sum(1 for m in msgs if self._is_photo_message(m))
@@ -1255,6 +1311,16 @@ class RelayBot:
                 source_topic_id = embedded_topic
 
             _, gid = key
+
+            if source_chat_id is not None and int(source_chat_id) in self._ignored_source_chats():
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_ignored_source",
+                    group_id=gid,
+                    source_chat_id=int(source_chat_id),
+                )
+                return
             caption_for_blocking = caption
 
             meta_parts = [self._document_meta_text(m) for m in msgs]
@@ -1434,6 +1500,16 @@ class RelayBot:
         embedded_chat, embedded_topic, stripped_original_text = _extract_embedded_source_markers_and_strip(original_text)
         source_chat_id = forward_source if forward_source is not None else embedded_chat
         source_topic_id = embedded_topic
+
+        if source_chat_id is not None and int(source_chat_id) in self._ignored_source_chats():
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_ignored_source",
+                message_id=msg.id,
+                source_chat_id=int(source_chat_id),
+            )
+            return
 
         # We use the original text for tweet URL detection even if strip_text is enabled.
         display_text = stripped_original_text

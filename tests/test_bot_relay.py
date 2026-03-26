@@ -126,6 +126,25 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
 
+    async def test_short_video_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        class FakeVideo:
+            def __init__(self):
+                self.attributes = [types.DocumentAttributeVideo(duration=4, w=1, h=1)]
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", video=FakeVideo())
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text="cap", message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_video_link_only_is_skipped(self):
         client = FakeClient()
         bot = RelayBot(
@@ -454,6 +473,27 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         await bot.handle(event)
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "hello", 42)])
+
+    async def test_ignored_source_chats_are_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0, "ignore_source_chats": [1234]},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(
+            message_id=10,
+            media="MEDIA",
+            raw_text="\u2063SRC_CHAT_ID=1234\nhello",
+            fwd_from=None,
+            video="VIDEO",
+        )
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+
+        await bot.handle(event)
+        self.assertEqual(client.calls, [])
 
     async def test_topic_specific_routes_choose_destinations_by_source_topic_id(self):
         client = FakeClient()

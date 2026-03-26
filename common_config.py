@@ -297,6 +297,15 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
     except Exception:  # noqa: BLE001
         twitter_max_media_files = 8
 
+    ignore_source_chats_raw = relay.get("ignore_source_chats", []) or []
+    ignore_source_chats: list[int] = []
+    if isinstance(ignore_source_chats_raw, list):
+        for x in ignore_source_chats_raw:
+            try:
+                ignore_source_chats.append(_normalize_chat_id(x))
+            except Exception:  # noqa: BLE001
+                continue
+
     return {
         "api_id": api_id,
         "api_hash": api_hash,
@@ -323,4 +332,5 @@ def load_relay_settings(manager: ConfigManager) -> dict[str, Any]:
         "ensure_forum_topics": ensure_forum_topics,
         "topic_renames": topic_renames,
         "topic_deletes": topic_deletes,
+        "ignore_source_chats": ignore_source_chats,
     }

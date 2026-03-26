@@ -88,6 +88,7 @@ class TestCommonConfig(unittest.TestCase):
                 "ensure_forum_topics": [{"chat_id": "-100", "topics": ["T1", "T2"]}],
                 "topic_renames": {"-100": {"Old": "New"}},
                 "topic_deletes": {"-100": ["DeleteMe"]},
+                "ignore_source_chats": ["-123"],
             }
         )
         self.path.write_text(json.dumps(cfg), encoding="utf-8")
@@ -105,6 +106,7 @@ class TestCommonConfig(unittest.TestCase):
         self.assertEqual(s["topic_deletes"], {-100: ["DeleteMe"]})
         self.assertEqual(s["forum_topic_ids"], {-100: {"a": 111, "b": 222}})
         self.assertTrue(s["require_forum_topic"])
+        self.assertEqual(s["ignore_source_chats"], [-123])
 
     def test_save(self):
         m = ConfigManager(str(self.path))

@@ -68,7 +68,9 @@
       "水果",
       "手機",
       "emby"
-    ]
+    ],
+
+    "ignore_source_chats": []
   },
   "proxy": null
 }
