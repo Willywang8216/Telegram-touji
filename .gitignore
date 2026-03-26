@@ -1,0 +1,7 @@
+logs/
+state/
+*.session
+*.session-journal
+*.cookies.txt
+twitter.cookies.txt
+.env

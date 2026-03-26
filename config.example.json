@@ -72,5 +72,21 @@
 
     "ignore_source_chats": []
   },
+
+  "twitter_watch": {
+    "enabled": false,
+    "cookies_file": null,
+    "sources": [
+      {
+        "profile": "Mastertpe1125",
+        "source_chat_id": -900000001,
+        "target_bot": "@your_middle_bot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "archive_file": "state/mastertpe1125.txt"
+      }
+    ]
+  },
+
   "proxy": null
 }

@@ -3,7 +3,10 @@ import logging
 import re
 import shlex
 import tempfile
+import time
 from pathlib import Path
+
+from twitter_watch import ensure_parent_dir, list_profile_tweets, tweet_id_from_url
 
 from telethon import TelegramClient, functions, types, utils
 from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MessageIdInvalidError
@@ -250,6 +253,8 @@ _EXTRA_BLOCKLIST_SUBSTRINGS = [
     "emby",
 ]
 
+_TWITTER_WATCH_DLQ_PATH = "logs/twitter_watch_dlq.jsonl"
+
 
 def _with_source_marker(source_chat_id: int, source_topic_id: int | None, text: str | None) -> str:
     out = f"{_SOURCE_CHAT_ID_MARKER_PREFIX}{int(source_chat_id)}\n"
@@ -299,6 +304,168 @@ async def rebuild_forwarding_map():
             log_event(logger, logging.INFO, "mapping_updated", source_chat=str(source_chat), target_bot=str(target_bot))
         except Exception as exc:  # noqa: BLE001
             log_event(logger, logging.ERROR, "mapping_failed", source_chat=str(source_chat), error=str(exc))
+
+
+def _read_archive_ids(path: str | Path) -> set[str]:
+    p = Path(path)
+    if not p.exists():
+        return set()
+    out: set[str] = set()
+    for line in p.read_text(encoding="utf-8").splitlines():
+        s = line.strip()
+        if s:
+            out.add(s)
+    return out
+
+
+def _append_archive_id(path: str | Path, tweet_id: str) -> None:
+    ensure_parent_dir(path)
+    with Path(path).open("a", encoding="utf-8") as f:
+        f.write(str(tweet_id).strip() + "\n")
+
+
+async def _poll_twitter_watch_source(src: dict, *, cookies_file: str | None, bot_cache: dict[str, object]) -> None:
+    profile = (src.get("profile") or src.get("account") or src.get("url") or "").strip()
+    if not profile:
+        return
+
+    try:
+        source_chat_id = int(src.get("source_chat_id"))
+    except Exception:  # noqa: BLE001
+        return
+
+    target_bot = str(src.get("target_bot") or "").strip()
+    if not target_bot.startswith("@"):  # keep it explicit
+        return
+
+    interval = int(src.get("poll_interval_sec", 300) or 300)
+    interval = max(30, interval)
+
+    fetch_limit = int(src.get("fetch_limit", 30) or 30)
+    fetch_limit = max(1, min(fetch_limit, 200))
+
+    archive_file = str(src.get("archive_file") or f"state/twitter_watch_{source_chat_id}.txt")
+
+    key = f"{target_bot}"
+    if key not in bot_cache:
+        ent = await client.get_entity(target_bot)
+        if not getattr(ent, "bot", False):
+            return
+        bot_cache[key] = ent
+
+    target_ent = bot_cache[key]
+
+    seen = _read_archive_ids(archive_file)
+
+    tweets = await asyncio.to_thread(list_profile_tweets, profile, cookies_file=cookies_file, limit=fetch_limit)
+    if not tweets:
+        log_event(logger, logging.INFO, "twitter_watch_empty", profile=str(profile), source_chat_id=source_chat_id)
+        return
+
+    pending: list[dict[str, str]] = []
+    for t in tweets:
+        url = str(t.get("url") or "")
+        tid = tweet_id_from_url(url)
+        if not tid or tid in seen:
+            continue
+        pending.append({"url": url, "text": str(t.get("text") or "")})
+
+    if not pending:
+        return
+
+    sent = 0
+    for t in reversed(pending):
+        url = str(t.get("url") or "").strip()
+        tid = tweet_id_from_url(url)
+        if not url or not tid or tid in seen:
+            continue
+
+        text = str(t.get("text") or "").strip()
+        body = (text + "\n" if text else "") + url
+        marked_text = _with_source_marker(source_chat_id, None, body)
+
+        await rate_limiter.wait()
+        await with_retry(
+            lambda: client.send_message(target_ent, marked_text),
+            retries=3,
+            base_delay=1,
+            logger=logger,
+            action="twitter_watch_send",
+        )
+
+        _append_archive_id(archive_file, tid)
+        seen.add(tid)
+        sent += 1
+
+    log_event(
+        logger,
+        logging.INFO,
+        "twitter_watch_sent",
+        profile=str(profile),
+        source_chat_id=source_chat_id,
+        sent=sent,
+        interval=interval,
+    )
+
+
+async def twitter_watch_loop() -> None:
+    next_run: dict[str, float] = {}
+    bot_cache: dict[str, object] = {}
+
+    while True:
+        try:
+            cfg = config_manager.load()
+            watch = cfg.get("twitter_watch", {}) or {}
+            if not watch.get("enabled", False):
+                await asyncio.sleep(10)
+                continue
+
+            sources = watch.get("sources", []) or []
+            if not sources:
+                await asyncio.sleep(10)
+                continue
+
+            cookies_file = watch.get("cookies_file")
+            if not cookies_file:
+                cookies_file = (cfg.get("relay", {}) or {}).get("twitter_cookies_file")
+
+            now = time.monotonic()
+            for src in sources:
+                if not isinstance(src, dict):
+                    continue
+
+                profile = str(src.get("profile") or src.get("account") or src.get("url") or "")
+                if not profile:
+                    continue
+
+                try:
+                    source_chat_id = int(src.get("source_chat_id"))
+                except Exception:  # noqa: BLE001
+                    continue
+
+                interval = int(src.get("poll_interval_sec", 300) or 300)
+                interval = max(30, interval)
+
+                key = f"{source_chat_id}:{profile}"
+                due = next_run.get(key, 0.0)
+                if now < due:
+                    continue
+
+                next_run[key] = now + interval
+
+                try:
+                    await _poll_twitter_watch_source(src, cookies_file=cookies_file, bot_cache=bot_cache)
+                except Exception as exc:  # noqa: BLE001
+                    payload = {"profile": profile, "source_chat_id": source_chat_id, "error": str(exc)}
+                    write_dlq(_TWITTER_WATCH_DLQ_PATH, payload)
+                    log_event(logger, logging.ERROR, "twitter_watch_poll_failed", **payload)
+
+            await asyncio.sleep(5)
+        except Exception as exc:  # noqa: BLE001
+            payload = {"error": str(exc)}
+            write_dlq(_TWITTER_WATCH_DLQ_PATH, payload)
+            log_event(logger, logging.ERROR, "twitter_watch_loop_failed", **payload)
+            await asyncio.sleep(10)
 
 
 def _extract_source_topic_top_id(msg) -> int | None:
@@ -948,7 +1115,19 @@ async def _cmd_add_route(event, args: str):
             continue
         dest_tokens.append(t)
 
-    destinations = _parse_destinations(dest_tokens)
+    destinations: list[dict] = []
+    non_link_dest_tokens: list[str] = []
+    for t in dest_tokens:
+        if looks_like_message_link(t):
+            chat_id, _, topic_top = await _resolve_message_link(t)
+            dest: dict = {"chat_id": int(chat_id)}
+            if topic_top is not None:
+                dest["topic_id"] = int(topic_top)
+            destinations.append(dest)
+        else:
+            non_link_dest_tokens.append(t)
+
+    destinations.extend(_parse_destinations(non_link_dest_tokens))
     if not destinations:
         await event.reply("🤖 错误: destinations 为空")
         return
@@ -1091,6 +1270,7 @@ async def main():
     await client.start()
     log_event(logger, logging.INFO, "userbot_started")
     await rebuild_forwarding_map()
+    asyncio.create_task(twitter_watch_loop())
 
     @client.on(NewMessage(func=lambda e: e.is_private and e.sender_id == settings["master_account_id"]))
     async def command_handler(event):
@@ -1180,6 +1360,137 @@ async def main():
         elif cmd == "/list_topics":
             await _cmd_list_topics(event, args)
 
+        elif cmd == "/list_x_watch":
+            cfg = config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            enabled = bool(tw.get("enabled", False))
+            sources = tw.get("sources", []) or []
+
+            if not sources:
+                await event.reply(f"🤖 twitter_watch: enabled={enabled} | sources=0")
+                return
+
+            lines = [f"🤖 twitter_watch: enabled={enabled}", ""]
+            for i, s in enumerate(sources, start=1):
+                if not isinstance(s, dict):
+                    continue
+                profile = str(s.get("profile") or s.get("account") or s.get("url") or "")
+                source_chat_id = s.get("source_chat_id")
+                target_bot = s.get("target_bot")
+                interval = s.get("poll_interval_sec", 300)
+                fetch_limit = s.get("fetch_limit", 30)
+                lines.append(
+                    f"{i}) {profile} | source_chat_id={source_chat_id} | target_bot={target_bot} | interval={interval}s | fetch_limit={fetch_limit}"
+                )
+
+            await event.reply("\n".join(lines)[:3500])
+
+        elif cmd == "/add_x_watch":
+            tokens = shlex.split(args or "")
+            if len(tokens) < 3:
+                await event.reply(
+                    "🤖 用法: /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
+                    "提示: source_chat_id 可以是任意负数，用于 relay.routes 匹配。"
+                )
+                return
+
+            profile = tokens[0]
+            source_chat_id = int(tokens[1])
+            bot = tokens[2].strip()
+            if not bot.startswith("@"):  
+                await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
+                return
+
+            kv: dict[str, str] = {}
+            for t in tokens[3:]:
+                if "=" not in t:
+                    continue
+                k, v = t.split("=", 1)
+                kv[k.strip()] = v.strip()
+
+            poll_interval_sec = int(kv.get("poll_interval_sec") or kv.get("interval") or 300)
+            fetch_limit = int(kv.get("fetch_limit") or kv.get("limit") or 30)
+            archive_file = kv.get("archive_file")
+
+            try:
+                ent = await client.get_entity(bot)
+                if not getattr(ent, "bot", False):
+                    await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
+                return
+
+            cfg = config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            new_entry: dict = {
+                "profile": str(profile),
+                "source_chat_id": int(source_chat_id),
+                "target_bot": bot,
+                "poll_interval_sec": max(30, int(poll_interval_sec)),
+                "fetch_limit": max(1, min(int(fetch_limit), 200)),
+            }
+            if archive_file:
+                new_entry["archive_file"] = str(archive_file)
+
+            updated = False
+            for i, s in enumerate(sources):
+                if not isinstance(s, dict):
+                    continue
+                existing_profile = str(s.get("profile") or s.get("account") or s.get("url") or "")
+                try:
+                    existing_source = int(s.get("source_chat_id") or 0)
+                except Exception:  # noqa: BLE001
+                    existing_source = 0
+
+                if existing_profile == str(profile) and existing_source == int(source_chat_id):
+                    sources[i] = new_entry
+                    updated = True
+                    break
+
+            if not updated:
+                sources.append(new_entry)
+
+            tw["enabled"] = True
+            tw["sources"] = sources
+            cfg["twitter_watch"] = tw
+            config_manager.save(cfg)
+
+            await event.reply(
+                "🤖 已添加 twitter_watch source（enabled=true）。\n"
+                "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。"
+            )
+
+        elif cmd == "/remove_x_watch":
+            tokens = shlex.split(args or "")
+            if len(tokens) != 1:
+                await event.reply("🤖 用法: /remove_x_watch <index>")
+                return
+
+            idx = int(tokens[0]) - 1
+            cfg = config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            if idx < 0 or idx >= len(sources):
+                await event.reply("🤖 错误: index 超出范围")
+                return
+
+            removed = sources.pop(idx)
+            tw["sources"] = sources
+            cfg["twitter_watch"] = tw
+            config_manager.save(cfg)
+
+            profile = None
+            try:
+                profile = str((removed or {}).get("profile") or "")
+            except Exception:  # noqa: BLE001
+                profile = None
+
+            await event.reply(f"🤖 已移除 twitter_watch: {profile or '(unknown)'}")
+
         else:
             await event.reply(
                 "🤖 Commands:\n"
@@ -1194,6 +1505,11 @@ async def main():
                 "/add_route <source_message_link> <dest_message_link> [dest_message_link...]\n"
                 "/remove_route <index>\n"
                 "/set_destinations <index> <dest...>\n"
+                "\n"
+                "Twitter watch:\n"
+                "/list_x_watch\n"
+                "/add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/...]\n"
+                "/remove_x_watch <index>\n"
             )
 
     await client.run_until_disconnected()

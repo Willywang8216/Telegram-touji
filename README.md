@@ -200,6 +200,43 @@ Then rerun export.
 }
 ```
 
+## Twitter/X account watch (poll & repost)
+
+This repo can optionally poll X (Twitter) profiles and repost new tweets that contain relayed media.
+
+How it works:
+
+- Userbot (`telegram_bot.py`) polls configured profiles (best-effort via yt-dlp) and sends each new tweet URL to the relay bot in a DM.
+- The message includes an embedded `SRC_CHAT_ID` marker so relaybot routing works.
+- Relaybot (`bot_relay.py`) expands the tweet URL into media (using `relay.twitter_cookies_file` / `RELAY_TWITTER_COOKIES_FILE`) and applies the same filters as normal.
+
+### Configure
+
+1) Save your X cookies (Netscape format) to a file, e.g. `twitter.cookies.txt`.
+   - Keep this file private. Don’t commit it.
+
+2) In `config.json`, enable `twitter_watch` and configure sources.
+
+3) Add a route for the `source_chat_id` you chose:
+
+```
+/add_route -900000001 -100<dest_chat_id>@<topic_top_msg_id>
+```
+
+Or use a topic title:
+
+```
+/add_route -900000001 -100<dest_chat_id>="Topic Title"
+```
+
+### Telegram commands
+
+In userbot DM (Saved Messages):
+
+- `/add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/...]`
+- `/list_x_watch`
+- `/remove_x_watch <index>`
+
 ## Manage from Telegram (commands)
 
 Userbot and relaybot can accept DM commands, but the allowed sender is controlled separately:
