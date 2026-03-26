@@ -236,368 +236,96 @@
 
     "require_forum_topic": false,
 
-    "topic_title_aliases": {
-      "-1002350290734": {
-        "🌍 Gay Westerner": "🌙 After Dark",
-        "🏋️ Gym Hunks": "💪 Jocks & Twinks",
-        "🐻 Asian bear": "🎯 Hidden Gems",
-        "📱 Viral Clips": "🔥 Hot Right Now"
-      },
-      "-1002349398833": {
-        "🏋️ 健身猛男": "💪 肌肉×鮮肉",
-        "🔒 鎖雞雞": "⛓️ 主奴調教"
-      }
-    },
-
-    "forum_topic_ids": {
-      "-1002350290734": {
-        "Chatting&Sharing": 77830,
-        "🧜 Asian Ladyboy": 77684,
-        "🔥 Hot Right Now": 77683,
-        "🔒 Gay Chastity": 77682,
-        "📼 Retro gay porn": 77681,
-        "💪 Jocks & Twinks": 77680,
-        "👀 Gay Exhibitionism/Voyeur": 77679,
-        "🎯 Hidden Gems": 77678,
-        "🍑 Booty Highlights": 77677,
-        "🇯🇵 Professional Japan Porn": 77676,
-        "✋ Spank Fetish": 77675,
-        "⛓️ BDSM & Power": 77674,
-        "🌙 After Dark": 75014,
-        "🍑 Cool Gay Porn 5": 71959,
-        "🍑 Cool Gay Porn 4": 71961,
-        "🍑 Cool GayPorn 3": 71960,
-        "🍑 Cool Gay Porn 2": 71957,
-        "🍑 Cool Gay Porn 1": 71956,
-        "Default Rout": 31868,
-        "🇹🇼 中文（繁體）": 5692
-      },
-      "-1002349398833": {
-        "聊天打屁（不可以澀澀": 827,
-        "一般聊天🥵殼以澀澀🥵": 80561,
-        "🧜 偽娘南娘瑟瑟": 80381,
-        "🔥 今日爆熱": 80380,
-        "📼 復古男同志片": 80379,
-        "📱 抖音裸舞": 80378,
-        "💪 肌肉×鮮肉": 80377,
-        "👀 戶外野裸露出": 80376,
-        "🐻 大號熊熊": 80375,
-        "🎯 冷門寶藏": 80374,
-        "🍑 翹臀精選": 80373,
-        "🌍 歐美GAY": 80372,
-        "🇯🇵 日本GV": 80371,
-        "✋ 不乖打屁屁": 80370,
-        "⛓️ 主奴調教": 80369,
-        "🥘 大雜燴": 72441,
-        "🍑 分流好看片片3": 49466,
-        "🍑 分流好看片片2": 23075,
-        "🍑 分流好看片片4": 23071,
-        "🍑 分流好看片片5": 23054,
-        "🍑 分流好看片片1": 23024
-      }
-    },
-
-    "post_captions": {
-      "-1002350290734": "It’s me SexualWill, Sexual Side of Nakedwill. I’m glad for you to be here. See https://contacts.sexualwill.com for more info. Please help share my works\n\nBy the way, I collect and relay cool clips I found online.\n\nP.S. Please help me subscribe to my fansone (free) so I could collaborate with others.\n\nhttps://fansone.co/nakedwei",
-      "-1002349398833": "這是光光的色色頻道，歡迎大家來一起色色，未滿十八歲請離開。拜託大家支持轉發分享訂閱：https://contacts.sexualwill.com\n\nP.S. 幫忙光光訂閱我的FANSONE 讓我能跟別人合作~ 拜託\n\nhttps://fansone.co/nakedwei"
-    },
-
-    "blocklist_substrings": [
-      "Ban: 各类rush有货",
-      "@GaySeikaiBot",
-      "网黄尊享",
-      "全球最快VPN",
-      "点击注册购买VPN",
-      "新年特惠活动",
-      "@xiaoxuxuezhang",
-      "@xiaoxuBot",
-      "⚠️群规必看",
-      "TG必 极搜",
-      "giveaway prizes",
-      "季付：￥",
-      "年付：￥",
-      "买一送一",
-      "活动优惠",
-      "活动时间",
-      "价格直降",
-      "加入会员私信联系",
-      "备用群https://t.me/",
-      "自用 VPN 仅需",
-
-      "vpn",
-      "jisou",
-      "新人",
-      "必红",
-      "必紅",
-      "赢",
-      "錢",
-      "钱",
-      "提款",
-      "德州扑克",
-      "德州撲克",
-      "娱乐城",
-      "qq",
-      "扑克",
-      "撲克",
-      "电报",
-      "電報",
-      "搜索",
-      "關鍵詞",
-      "关键词",
-      "search",
-      "bot",
-      "注册",
-      "註冊",
-      "即领",
-      "即領",
-      "礼包",
-      "禮包",
-      "福利",
-      "优惠",
-      "優惠",
-      "soso",
-
-      "私聊",
-      "拉伸",
-      "挤奶",
-      "擠奶",
-      "广告",
-      "廣告",
-      "搬u",
-      "搬U",
-      "赚钱",
-      "賺錢",
-      "靠谱",
-      "靠譜",
-      "跑分",
-      "套路",
-      "进群",
-      "進群",
-      "上万",
-      "上萬",
-      "灰产",
-      "灰產",
-      "跑米",
-      "赚",
-      "賺",
-
-      "whereby",
-      "博彩",
-      "D品",
-      "时事",
-      "時事",
-      "投资",
-      "投資",
-      "理财",
-      "理財",
-      "链接",
-      "連結",
-      "代理",
-      "返利",
-      "原价",
-      "原價",
-      "赌博",
-      "賭博",
-      "诈骗",
-      "詐騙",
-      "预览",
-      "預覽",
-      "门槛",
-      "費用",
-      "费用",
-      "暗号"
-    ],
-
-    "distribute_unrouted_to_buckets": true,
-    "unrouted_distribution_mode": "message",
-    "general_topic_buckets": {
-      "-1002350290734": ["🔥 Hot Right Now", "💪 Jocks & Twinks", "🍑 Booty Highlights", "🌙 After Dark", "🎯 Hidden Gems"],
-      "-1002349398833": ["🔥 今日爆熱", "💪 肌肉×鮮肉", "🍑 翹臀精選", "📱 抖音裸舞", "🎯 冷門寶藏"]
-    },
+    "distribute_unrouted_to_buckets": false,
 
     "default_destinations": [
-      {"chat_id": -1002350290734, "topic_title": "🎯 Hidden Gems"},
-      {"chat_id": -1002349398833, "topic_title": "🎯 冷門寶藏"}
+      {"chat_id": -1002349398833, "topic_title": "🥘 大雜燴", "topic_id": 72345},
+      {"chat_id": -1002350290734, "topic_title": "Uncategorized", "topic_id": 83836}
     ],
 
     "routes": [
       {
         "source_chats": [-1001514501094, -1002468021605],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🐻 Asian bear"},
-          {"chat_id": -1002349398833, "topic_title": "🐻 大號熊熊"}
+          {"chat_id": -1002350290734, "topic_title": "🐻 Asian bear", "topic_id": 77678},
+          {"chat_id": -1002349398833, "topic_title": "🐻 大號熊熊", "topic_id": 80375}
         ]
       },
       {
         "source_chats": [-1001687156607, -1001667507136, -1002217337055, -1001348978258, -1002520119538, -1002540419212, -1001196731716, -1002852607069],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🧜 Asian Ladyboy"},
-          {"chat_id": -1002349398833, "topic_title": "🧜 偽娘南娘瑟瑟"}
+          {"chat_id": -1002350290734, "topic_title": "🧜 Asian Ladyboy", "topic_id": 77684},
+          {"chat_id": -1002349398833, "topic_title": "🧜 偽娘南娘瑟瑟", "topic_id": 80381}
         ]
       },
       {
         "source_chats": [-1002358049067],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🇯🇵 Professional Japan Porn"},
-          {"chat_id": -1002349398833, "topic_title": "🇯🇵 日本GV"}
+          {"chat_id": -1002350290734, "topic_title": "🇯🇵 Professional Japan Porn", "topic_id": 77676},
+          {"chat_id": -1002349398833, "topic_title": "🇯🇵 日本GV", "topic_id": 80371}
         ]
       },
       {
-        "source_chats": [
-          -1001156240041,
-          -1001397590628,
-          -1002221757691,
-          -1001328076757,
-          -1002051047449,
-          -1002118370475,
-          -1001307543655,
-          -1001588132843,
-          -1001434047674,
-          -1001923078678,
-          -1001577669500,
-          -1002012578225,
-          -1002053844493,
-          -1001998307033,
-          -1001420323123,
-          -1002310844949,
-          -1001629796864
-        ],
+        "source_chats": [-1001156240041, -1001397590628, -1002221757691, -1001328076757, -1002051047449, -1002118370475, -1001307543655, -1001588132843, -1001434047674, -1001923078678, -1001577669500, -1002012578225, -1002053844493, -1001998307033, -1001420323123, -1002310844949, -1001629796864],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🌍 Gay Westerner"},
-          {"chat_id": -1002349398833, "topic_title": "🌍 歐美GAY"}
+          {"chat_id": -1002350290734, "topic_title": "🌍 Gay Westerner", "topic_id": 75014},
+          {"chat_id": -1002349398833, "topic_title": "🌍 歐美GAY", "topic_id": 80372}
         ]
       },
       {
         "source_chats": [-1001331643461],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "📼 Retro gay porn"},
-          {"chat_id": -1002349398833, "topic_title": "📼 復古男同志片"}
+          {"chat_id": -1002350290734, "topic_title": "📼 Retro gay porn", "topic_id": 77681},
+          {"chat_id": -1002349398833, "topic_title": "📼 復古男同志片", "topic_id": 80379}
         ]
       },
       {
         "source_chats": [-1001653838131, -1001715232027, -1002091206936],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🔒 Gay Chastity"},
-          {"chat_id": -1002349398833, "topic_title": "🔒 鎖雞雞"}
+          {"chat_id": -1002350290734, "topic_title": "🔒 Gay Chastity", "topic_id": 77682},
+          {"chat_id": -1002349398833, "topic_title": "🔒 鎖雞雞", "topic_id": 80369}
         ]
       },
       {
         "source_chats": [-1002834942876, -1001170422687],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "✋ Spank Fetish"},
-          {"chat_id": -1002349398833, "topic_title": "✋ 不乖打屁屁"}
+          {"chat_id": -1002350290734, "topic_title": "✋ Spank Fetish", "topic_id": 77675},
+          {"chat_id": -1002349398833, "topic_title": "✋ 不乖打屁屁", "topic_id": 80370}
         ]
       },
       {
-        "source_chats": [
-          -1002084109422,
-          -1001653390193,
-          -1001324934276,
-          -1001382374610,
-          -1001671049698,
-          -1002878477666,
-          -1002124773631,
-          -1001449331726,
-          -1002318895277,
-          -1002393626177,
-          -1001696928273,
-          -1002553556448,
-          -1003652047670,
-          -1002067867507
-        ],
+        "source_chats": [-1002084109422, -1001653390193, -1001324934276, -1001382374610, -1001671049698, -1002878477666, -1002124773631, -1001449331726, -1002318895277, -1002393626177, -1001696928273, -1002553556448, -1003652047670, -1002067867507],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "👀 Gay Exhibitionism/Voyeur"},
-          {"chat_id": -1002349398833, "topic_title": "👀 戶外野裸露出"}
+          {"chat_id": -1002350290734, "topic_title": "👀 Gay Exhibitionism/Voyeur", "topic_id": 77679},
+          {"chat_id": -1002349398833, "topic_title": "👀 戶外野裸露出", "topic_id": 80376}
         ]
       },
       {
         "source_chats": [-1002316829227, -1001922776691, -1002177948690, -1002490743575, -1003579332390, -1001523463192, -1002042010260, -1001628564125, -1001610469476, -1002409562497, -1002676383759, -1002200158349, -1003746692279],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "🏋️ Gym Hunks"},
-          {"chat_id": -1002349398833, "topic_title": "🏋️ 健身猛男"}
+          {"chat_id": -1002350290734, "topic_title": "🏋️ Gym Hunks", "topic_id": 77680},
+          {"chat_id": -1002349398833, "topic_title": "🏋️ 健身猛男", "topic_id": 80377}
         ]
       },
       {
         "source_chats": [-1002306050284, -1003281205519, -1002024729997, -1001629395599, -1002502271600, -1002690214636, -1002829212971],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "⛓️ BDSM & Power"},
-          {"chat_id": -1002349398833, "topic_title": "⛓️ 主奴調教"}
+          {"chat_id": -1002350290734, "topic_title": "⛓️ BDSM & Power", "topic_id": 77674},
+          {"chat_id": -1002349398833, "topic_title": "⛓️ 主奴調教", "topic_id": 80369}
         ]
       },
       {
         "source_chats": [-1002837109291, -1002957342657, -1001160039423, -1001815453153],
         "destinations": [
-          {"chat_id": -1002350290734, "topic_title": "📱 Viral Clips"},
-          {"chat_id": -1002349398833, "topic_title": "📱 抖音裸舞"}
+          {"chat_id": -1002350290734, "topic_title": "📱 Viral Clips", "topic_id": 77683},
+          {"chat_id": -1002349398833, "topic_title": "📱 抖音裸舞", "topic_id": 80378}
         ]
       }
     ],
 
-    "ensure_forum_topics": [
-      {
-        "chat_id": -1002350290734,
-        "topics": [
-          "🔥 Hot Right Now",
-          "💪 Jocks & Twinks",
-          "🍑 Booty Highlights",
-          "🌙 After Dark",
-          "🎯 Hidden Gems",
-          "🐻 Asian bear",
-          "🧜 Asian Ladyboy",
-          "🇯🇵 Professional Japan Porn",
-          "🌍 Gay Westerner",
-          "📼 Retro gay porn",
-          "🔒 Gay Chastity",
-          "✋ Spank Fetish",
-          "👀 Gay Exhibitionism/Voyeur",
-          "🏋️ Gym Hunks",
-          "⛓️ BDSM & Power",
-          "📱 Viral Clips"
-        ]
-      },
-      {
-        "chat_id": -1002349398833,
-        "topics": [
-          "🔥 今日爆熱",
-          "💪 肌肉×鮮肉",
-          "🍑 翹臀精選",
-          "📱 抖音裸舞",
-          "🎯 冷門寶藏",
-          "🐻 大號熊熊",
-          "🧜 偽娘南娘瑟瑟",
-          "🇯🇵 日本GV",
-          "🌍 歐美GAY",
-          "📼 復古男同志片",
-          "🔒 鎖雞雞",
-          "✋ 不乖打屁屁",
-          "👀 戶外野裸露出",
-          "🏋️ 健身猛男",
-          "⛓️ 主奴調教"
-        ]
-      }
-    ],
+    "forum_topic_ids": {},
 
-    "topic_renames": {
-      "-1002350290734": {
-        "🍑 Asian Porn 1": "🔥 Hot Right Now",
-        "🍑 Asian Porn 2": "💪 Jocks & Twinks",
-        "🍑 Asian Porn 3": "🍑 Booty Highlights",
-        "🍑 Asian Porn 4": "🌙 After Dark",
-        "🍑 Asian Porn 5": "🎯 Hidden Gems"
-      },
-      "-1002349398833": {
-        "🍑 分流好看片片1": "🔥 今日爆熱",
-        "🍑 分流好看片片2": "💪 肌肉×鮮肉",
-        "🍑 分流好看片片3": "🍑 翹臀精選",
-        "🍑 分流好看片片4": "📱 抖音裸舞",
-        "🍑 分流好看片片5": "🎯 冷門寶藏"
-      }
-    },
-
-    "topic_deletes": {
-      "-1002350290734": ["🧭 Default Rout", "🇺🇸 English"],
-      "-1002349398833": ["🥘 大雜燴", "🇹🇼 中文（繁體）"]
-    }
+    "blocklist_substrings": []
   },
   "proxy": null
 }

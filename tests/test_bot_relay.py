@@ -206,6 +206,46 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(client.calls, [])
 
+    async def test_pdf_document_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        class FakeDoc:
+            def __init__(self):
+                self.mime_type = "application/pdf"
+                self.attributes = [types.DocumentAttributeFilename(file_name="doc.pdf")]
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", document=FakeDoc())
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_txt_document_is_skipped_by_filename(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        class FakeDoc:
+            def __init__(self):
+                self.mime_type = "application/octet-stream"
+                self.attributes = [types.DocumentAttributeFilename(file_name="notes.txt")]
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", document=FakeDoc())
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
     async def test_too_many_links_is_skipped_even_for_video(self):
         client = FakeClient()
         bot = RelayBot(

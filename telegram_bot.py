@@ -3,6 +3,7 @@ import logging
 import re
 import shlex
 import tempfile
+from pathlib import Path
 
 from telethon import TelegramClient, functions, types, utils
 from telethon.errors.rpcerrorlist import ChatForwardsRestrictedError, MessageIdInvalidError
@@ -49,6 +50,10 @@ blocklist_substrings = (config_manager.load().get("relay", {}) or {}).get("block
 rate_limiter = AsyncRateLimiter(rate_per_sec=8)
 DLQ_PATH = "logs/userbot_dlq.jsonl"
 _MAX_LINKS = 3
+
+_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
+_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
+
 _URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 
@@ -148,6 +153,26 @@ def _is_photo_message(msg) -> bool:
     mime = str(getattr(doc, "mime_type", "") or "")
     if mime.startswith("image/") and not _is_video_message(msg):
         return True
+
+    return False
+
+
+def _is_disallowed_document(msg) -> bool:
+    doc = getattr(msg, "document", None)
+    if doc is None:
+        return False
+
+    mime = str(getattr(doc, "mime_type", "") or "").casefold()
+    if mime in _DISALLOWED_DOC_MIMES:
+        return True
+
+    for attr in getattr(doc, "attributes", []) or []:
+        fn = getattr(attr, "file_name", None)
+        if not fn:
+            continue
+        ext = Path(str(fn)).suffix.lower()
+        if ext in _DISALLOWED_DOC_EXTS:
+            return True
 
     return False
 
@@ -344,6 +369,7 @@ async def handler(event):
     filter_haystack = _filter_haystack(msg_text, event.message)
 
     is_gif_or_sticker = _is_gif_or_sticker(event.message)
+    is_disallowed_doc = _is_disallowed_document(event.message)
     is_blocked = bool(filter_haystack and _is_blocked(filter_haystack))
     too_many_links = _has_too_many_links(msg_text)
 
@@ -353,6 +379,16 @@ async def handler(event):
                 logger,
                 logging.INFO,
                 "message_skipped_gif_or_sticker",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
+            )
+            return
+
+        if is_disallowed_doc:
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_disallowed_document",
                 chat_id=str(event.chat_id),
                 message_id=getattr(event.message, "id", None),
             )
@@ -425,7 +461,7 @@ async def handler(event):
             elif media_group_cache[key].get("source_topic_id") is None and source_topic_id is not None:
                 media_group_cache[key]["source_topic_id"] = source_topic_id
 
-            if is_gif_or_sticker or is_blocked or too_many_links:
+            if is_gif_or_sticker or is_disallowed_doc or is_blocked or too_many_links:
                 media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
@@ -476,6 +512,10 @@ async def process_media_group(key: tuple[int, int]):
 
     if any(_is_gif_or_sticker(m) for m in msgs):
         log_event(logger, logging.INFO, "group_skipped_gif_or_sticker", chat_id=str(from_peer), group_id=grouped_id)
+        return
+
+    if any(_is_disallowed_document(m) for m in msgs):
+        log_event(logger, logging.INFO, "group_skipped_disallowed_document", chat_id=str(from_peer), group_id=grouped_id)
         return
 
     if any(getattr(m, "media", None) is not None for m in msgs) and not str(caption_check or "").strip():

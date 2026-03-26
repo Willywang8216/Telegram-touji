@@ -39,8 +39,18 @@ DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
 _MAX_LINKS = 3
 
-_IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+
+_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
+_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
+</old_code><new_code>_IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+_VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+
+_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
+_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}</old_code><new_code>_VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
+
+_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
+_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
 
 _URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
@@ -689,6 +699,25 @@ class RelayBot:
                 return True
         return False
 
+    def _is_disallowed_document(self, msg) -> bool:
+        doc = getattr(msg, "document", None)
+        if doc is None:
+            return False
+
+        mime = str(getattr(doc, "mime_type", "") or "").casefold()
+        if mime in _DISALLOWED_DOC_MIMES:
+            return True
+
+        for attr in getattr(doc, "attributes", []) or []:
+            fn = getattr(attr, "file_name", None)
+            if not fn:
+                continue
+            ext = Path(str(fn)).suffix.lower()
+            if ext in _DISALLOWED_DOC_EXTS:
+                return True
+
+        return False
+
     def _is_video_message(self, msg) -> bool:
         return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
 
@@ -714,6 +743,8 @@ class RelayBot:
     def _should_relay_single(self, msg, *, uploadable_media: bool, expanded: ExpandedMedia | None) -> tuple[bool, str]:
         if self._is_gif_or_sticker(msg):
             return False, "gif_or_sticker"
+        if self._is_disallowed_document(msg):
+            return False, "disallowed_document"
 
         if uploadable_media:
             if self._is_video_message(msg):
@@ -738,6 +769,8 @@ class RelayBot:
     def _should_relay_album(self, msgs: list[Any]) -> tuple[bool, str]:
         if any(self._is_gif_or_sticker(m) for m in msgs):
             return False, "gif_or_sticker"
+        if any(self._is_disallowed_document(m) for m in msgs):
+            return False, "disallowed_document"
 
         if any(self._is_video_message(m) for m in msgs):
             return True, "video"
@@ -1254,6 +1287,16 @@ class RelayBot:
                 )
                 return
 
+            if any(self._is_disallowed_document(m) for m in msgs):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_disallowed_document",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
             if any(getattr(m, "media", None) for m in msgs) and not str(caption_for_blocking or "").strip():
                 log_event(
                     self.logger,
@@ -1446,6 +1489,18 @@ class RelayBot:
                 self.logger,
                 logging.INFO,
                 "message_skipped_gif_or_sticker",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            if expanded is not None:
+                expanded.cleanup()
+            return
+
+        if self._is_disallowed_document(msg):
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_disallowed_document",
                 message_id=msg.id,
                 source_chat_id=source_chat_id,
             )
