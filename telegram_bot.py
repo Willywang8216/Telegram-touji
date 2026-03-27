@@ -18,6 +18,7 @@ from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import extract_tweet_urls
+from route_filter_utils import filter_routes, parse_route_filters
 
 try:
     from structured_logger import get_logger, log_event
@@ -921,13 +922,12 @@ async def _resolve_message_link(link: str) -> tuple[int, int, int | None]:
     return chat_id, int(parsed.message_id), topic_top
 
 
-async def _cmd_list_routes(event):
-    cfg = config_manager.load(force=True)
-    relay = cfg.get("relay", {}) or {}
-    routes = relay.get("routes", []) or []
-    if not routes:
-        await event.reply("🤖 routes 为空")
-        return
+async def _build_routes_report(routes: list[dict], args: str) -> str | None:
+    filtered = filter_routes(list(routes), filters=parse_route_filters(args or "")) if (args or "").strip() else list(routes)
+    if not filtered:
+        return None
+
+    keep = {id(r) for r in filtered}
 
     entity_cache: dict[int, object] = {}
     topic_title_cache: dict[tuple[int, int], str] = {}
@@ -971,10 +971,16 @@ async def _cmd_list_routes(event):
         topic_title_cache[key] = str(title)
         return str(title)
 
-    out: list[str] = ["🤖 Routes:"]
+    out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
+    if (args or "").strip():
+        out.append(f"Filters: {args}")
+    out.append("Tip: use /export_routes to always download a file.")
 
-    for i, r in enumerate(routes, start=1):
-        out.append(f"\n{i})")
+    for idx, r in enumerate(routes, start=1):
+        if id(r) not in keep:
+            continue
+
+        out.append(f"\n{idx})")
 
         source_chats = [int(x) for x in (r.get("source_chats") or [])]
         source_topics = [int(x) for x in (r.get("source_topics") or [])]
@@ -1038,7 +1044,22 @@ async def _cmd_list_routes(event):
 
             out.append(line)
 
-    text = "\n".join(out)
+    return "\n".join(out)
+
+
+async def _cmd_list_routes(event, args: str = ""):
+    cfg = config_manager.load(force=True)
+    relay = cfg.get("relay", {}) or {}
+    routes = relay.get("routes", []) or []
+    if not routes:
+        await event.reply("🤖 routes 为空")
+        return
+
+    text = await _build_routes_report(list(routes), args)
+    if not text:
+        await event.reply("🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]")
+        return
+
     if len(text) <= 3500:
         await event.reply(text)
         return
@@ -1049,6 +1070,29 @@ async def _cmd_list_routes(event):
         with open(path, "w", encoding="utf-8") as f:
             f.write(text)
         await client.send_file(event.chat_id, path, caption="🤖 Routes 太长，已导出为文件")
+    finally:
+        tmp.cleanup()
+
+
+async def _cmd_export_routes(event, args: str = ""):
+    cfg = config_manager.load(force=True)
+    relay = cfg.get("relay", {}) or {}
+    routes = relay.get("routes", []) or []
+    if not routes:
+        await event.reply("🤖 routes 为空")
+        return
+
+    text = await _build_routes_report(list(routes), args)
+    if not text:
+        await event.reply("🤖 未匹配到 routes。")
+        return
+
+    tmp = tempfile.TemporaryDirectory(prefix="routes_")
+    try:
+        path = f"{tmp.name}/routes.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        await client.send_file(event.chat_id, path, caption="🤖 Routes 导出")
     finally:
         tmp.cleanup()
 
@@ -1170,7 +1214,8 @@ async def _cmd_set_destinations(event, args: str):
     if len(tokens) < 2:
         await event.reply(
             "🤖 用法: /set_destinations <route_index> <dest_chat>[@<topic_top_msg_id>] | <dest_chat>=\"<topic_title>\" ...\n"
-            "或: /set_destinations <route_index> <dest_message_link> [dest_message_link...]"
+            "或: /set_destinations <route_index> <dest_message_link> [dest_message_link...]\n"
+            "示例: /set_destinations 3 -1002222222222=\"🔥 Hot Right Now\" -1003333333333=\"🔥 今日爆熱\""
         )
         return
 
@@ -1206,7 +1251,7 @@ async def _cmd_set_destinations(event, args: str):
 async def _cmd_list_topics(event, args: str):
     tokens = shlex.split(args or "")
     if not tokens:
-        await event.reply("🤖 用法: /list_topics <chat_id_or_username> [limit]")
+        await event.reply("🤖 用法: /list_topics <chat_id_or_username> [limit]\n示例: /list_topics -1001234567890 50")
         return
 
     chat_ref = tokens[0]
@@ -1266,6 +1311,91 @@ async def _cmd_list_topics(event, args: str):
         await event.reply(f"🤖 读取 topics 失败: {type(exc).__name__}: {exc}")
 
 
+async def _cmd_help(event):
+    text = "\n".join(
+        [
+            "🤖 Userbot help (DM commands to this userbot; recommended: Saved Messages)",
+            "",
+            "Listen management:",
+            "- /join <chat_link_or_username>",
+            "  Examples:",
+            "    /join https://t.me/somechannel",
+            "    /join @somegroup",
+            "- /leave <chat_id_or_username>",
+            "  Examples:",
+            "    /leave -1001234567890",
+            "    /leave @somechannel",
+            "- /add_listen <source_chat_id> <@relay_bot_username>",
+            "  Examples:",
+            "    /add_listen -1001234567890 @YourRelayBot",
+            "    /add_listen -1009998887776 @YourRelayBot",
+            "- /remove_listen <source_chat_id>",
+            "  Example: /remove_listen -1001234567890",
+            "- /list_listen",
+            "",
+            "Routes (edits relay.routes in config.json):",
+            "- /add_route <source_chat[,source_chat...]> [source_topic=<top_msg_id>] <dest...>",
+            "  Dest formats:",
+            "    <dest_chat_id>=\"<topic_title>\"",
+            "    <dest_chat_id>@<topic_top_message_id>",
+            "    <dest_chat_id>",
+            "  Examples:",
+            "    /add_route -1001234567890 -1002222222222=\"🔥 Hot Right Now\" -1003333333333=\"🔥 今日爆熱\"",
+            "    /add_route -1001234567890 source_topic=777 -1002222222222=\"Topic A\"",
+            "  Link-based route form:",
+            "    /add_route <source_message_link> <dest_message_link> [dest_message_link...]",
+            "  Example:",
+            "    /add_route https://t.me/c/111/222/333 https://t.me/c/444/555/666",
+            "- /remove_route <index>  (index is the number shown in /list_routes)",
+            "  Example: /remove_route 3",
+            "- /set_destinations <index> <dest...>",
+            "  Example: /set_destinations 3 -1002222222222=\"🔥 Hot Right Now\"",
+            "",
+            "Routes viewing / filtering:",
+            "- /list_routes [filters...]",
+            "  Filters: source=<id> dest=<id> topic=<substring> topic_id=<id> + free text terms",
+            "  Examples:",
+            "    /list_routes",
+            "    /list_routes source=-1001234567890",
+            "    /list_routes dest=-1002222222222",
+            "    /list_routes topic=\"Hot\"",
+            "- /export_routes [filters...]  (always sends a routes.txt file)",
+            "  Examples:",
+            "    /export_routes",
+            "    /export_routes source=-1001234567890",
+            "",
+            "Forum utilities:",
+            "- /list_topics <chat_id_or_username> [limit]",
+            "  Examples:",
+            "    /list_topics -1001234567890",
+            "    /list_topics @someforumgroup 100",
+            "",
+            "Twitter/X watch:",
+            "- /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]",
+            "  Example:",
+            "    /add_x_watch https://x.com/Mastertpe1125 -900000001 @YourRelayBot poll_interval_sec=300 fetch_limit=30 archive_file=state/mastertpe1125.txt",
+            "- /list_x_watch",
+            "- /remove_x_watch <index>",
+            "",
+            "Other:",
+            "- /help or /start",
+        ]
+    )
+
+    if len(text) <= 3500:
+        await event.reply(text)
+        return
+
+    tmp = tempfile.TemporaryDirectory(prefix="help_")
+    try:
+        path = f"{tmp.name}/help.txt"
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(text)
+        await client.send_file(event.chat_id, path, caption="🤖 Help")
+    finally:
+        tmp.cleanup()
+
+
 async def main():
     await client.start()
     log_event(logger, logging.INFO, "userbot_started")
@@ -1276,6 +1406,10 @@ async def main():
     async def command_handler(event):
         cmd, args = parse_command(event.message.text)
         if not cmd:
+            return
+
+        if cmd in {"/help", "/start"}:
+            await _cmd_help(event)
             return
 
         if cmd == "/join":
@@ -1346,7 +1480,10 @@ async def main():
                 await event.reply("🤖 当前列表为空。")
 
         elif cmd == "/list_routes":
-            await _cmd_list_routes(event)
+            await _cmd_list_routes(event, args)
+
+        elif cmd == "/export_routes":
+            await _cmd_export_routes(event, args)
 
         elif cmd == "/add_route":
             await _cmd_add_route(event, args)
@@ -1492,25 +1629,7 @@ async def main():
             await event.reply(f"🤖 已移除 twitter_watch: {profile or '(unknown)'}")
 
         else:
-            await event.reply(
-                "🤖 Commands:\n"
-                "/join <chat>\n"
-                "/leave <chat>\n"
-                "/add_listen <source_chat> <@relay_bot>\n"
-                "/remove_listen <source_chat>\n"
-                "/list_listen\n"
-                "/list_topics <chat> [limit]\n"
-                "/list_routes\n"
-                "/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
-                "/add_route <source_message_link> <dest_message_link> [dest_message_link...]\n"
-                "/remove_route <index>\n"
-                "/set_destinations <index> <dest...>\n"
-                "\n"
-                "Twitter watch:\n"
-                "/list_x_watch\n"
-                "/add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/...]\n"
-                "/remove_x_watch <index>\n"
-            )
+            await _cmd_help(event)
 
     await client.run_until_disconnected()
 

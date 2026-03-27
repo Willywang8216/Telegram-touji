@@ -15,6 +15,7 @@ from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
 from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import download_tweet_media, extract_tweet_urls
+from route_filter_utils import filter_routes, parse_route_filters
 
 try:
     from structured_logger import get_logger, log_event
@@ -936,18 +937,183 @@ class RelayBot:
         self.settings = load_relay_settings(self.config_manager)
         self._maybe_log_topic_config_warning(self.settings)
 
+    async def _build_routes_report(self, routes: list[dict[str, Any]], args: str) -> str | None:
+        filtered = filter_routes(list(routes), filters=parse_route_filters(args or "")) if (args or "").strip() else list(routes)
+        if not filtered:
+            return None
+
+        keep = {id(r) for r in filtered}
+
+        entity_cache: dict[int, object] = {}
+        topic_title_cache: dict[tuple[int, int], str] = {}
+
+        async def _get_entity(chat_id: int):
+            if chat_id in entity_cache:
+                return entity_cache[chat_id]
+            ent = await self.client.get_entity(chat_id)
+            entity_cache[chat_id] = ent
+            return ent
+
+        def _entity_label(ent) -> str:
+            title = getattr(ent, "title", None)
+            username = getattr(ent, "username", None)
+            if title and username:
+                return f"{title} (@{username})"
+            if title:
+                return str(title)
+            if username:
+                return f"@{username}"
+            return str(getattr(ent, "id", ""))
+
+        async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
+            if top_message_id == 1:
+                return "General"
+
+            key = (chat_id, top_message_id)
+            if key in topic_title_cache:
+                return topic_title_cache[key]
+
+            ent = await _get_entity(chat_id)
+            msg = await self.client.get_messages(ent, ids=int(top_message_id))
+            if not msg:
+                return None
+
+            action = getattr(msg, "action", None)
+            title = getattr(action, "title", None)
+            if not title:
+                return None
+
+            topic_title_cache[key] = str(title)
+            return str(title)
+
+        out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
+        if (args or "").strip():
+            out.append(f"Filters: {args}")
+        out.append("Tip: use /export_routes to always download a file.")
+
+        for idx, r in enumerate(routes, start=1):
+            if id(r) not in keep:
+                continue
+
+            out.append(f"\n{idx})")
+
+            source_chats = [int(x) for x in (r.get("source_chats") or [])]
+            source_topics = [int(x) for x in (r.get("source_topics") or [])]
+            destinations = list(r.get("destinations") or [])
+
+            out.append("  Sources:")
+            for cid in source_chats:
+                try:
+                    ent = await _get_entity(cid)
+                    out.append(f"    - {cid} | {_entity_label(ent)}")
+                except Exception:  # noqa: BLE001
+                    out.append(f"    - {cid}")
+
+                if source_topics:
+                    topic_parts: list[str] = []
+                    for tid in source_topics:
+                        try:
+                            title = await _topic_title(cid, tid)
+                        except Exception:  # noqa: BLE001
+                            title = None
+                        if title:
+                            topic_parts.append(f"{tid} | {title}")
+                        else:
+                            topic_parts.append(str(tid))
+                    out.append("      topics: " + "; ".join(topic_parts))
+                else:
+                    try:
+                        ent = entity_cache.get(cid) or await _get_entity(cid)
+                        if getattr(ent, "forum", False):
+                            out.append("      topics: ALL")
+                    except Exception:  # noqa: BLE001
+                        pass
+
+            out.append("  Destinations:")
+            for d in destinations:
+                chat_id = int(d.get("chat_id"))
+                chat_label = None
+                try:
+                    ent = await _get_entity(chat_id)
+                    chat_label = _entity_label(ent)
+                except Exception:  # noqa: BLE001
+                    chat_label = None
+
+                line = f"    - {chat_id}"
+                if chat_label:
+                    line += f" | {chat_label}"
+
+                if d.get("topic_id") is not None:
+                    topic_id = int(d.get("topic_id"))
+                    topic_label = None
+                    try:
+                        topic_label = await _topic_title(chat_id, topic_id)
+                    except Exception:  # noqa: BLE001
+                        topic_label = None
+
+                    line += f" | topic_id={topic_id}"
+                    if topic_label:
+                        line += f" | {topic_label}"
+                elif d.get("topic_title"):
+                    line += f" | topic_title=\"{d.get('topic_title')}\""
+
+                out.append(line)
+
+        return "\n".join(out)
+
     async def _handle_command(self, event, stripped_text: str) -> None:
         cmd, args = parse_command(stripped_text)
 
         if cmd in {"/help", "/start"}:
-            await event.reply(
-                "🤖 RelayBot commands:\n"
-                "/list_routes\n"
-                "/add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest_chat>@<topic_top_msg_id> | <dest_chat>=\"<topic_title>\" ...\n"
-                "/add_route <source_message_link> <dest_message_link> [dest_message_link...]\n"
-                "/remove_route <index>\n"
-                "/set_destinations <index> <dest...>\n"
+            text = "\n".join(
+                [
+                    "🤖 RelayBot help (DM commands to this bot)",
+                    "",
+                    "Routes viewing / filtering:",
+                    "- /list_routes [filters...]",
+                    "  Filters: source=<id> dest=<id> topic=<substring> topic_id=<id> + free text terms",
+                    "  Examples:",
+                    "    /list_routes",
+                    "    /list_routes source=-1001234567890",
+                    "    /list_routes dest=-1002222222222",
+                    "    /list_routes topic=\"Hot\"",
+                    "- /export_routes [filters...]  (always sends a routes.txt file)",
+                    "  Examples:",
+                    "    /export_routes",
+                    "    /export_routes source=-1001234567890",
+                    "",
+                    "Route editing:",
+                    "- /add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest...>",
+                    "  Dest formats:",
+                    "    <dest_chat_id>=\"<topic_title>\"",
+                    "    <dest_chat_id>@<topic_top_message_id>",
+                    "    <dest_chat_id>",
+                    "  Examples:",
+                    "    /add_route -1001234567890 -1002222222222=\"🔥 Hot Right Now\" -1003333333333=\"🔥 今日爆熱\"",
+                    "    /add_route -1001234567890 source_topic=777 -1002222222222=\"Topic A\"",
+                    "  Link-based route form:",
+                    "    /add_route <source_message_link> <dest_message_link> [dest_message_link...]",
+                    "  Example:",
+                    "    /add_route https://t.me/c/111/222/333 https://t.me/c/444/555/666",
+                    "- /remove_route <index>",
+                    "  Example: /remove_route 3",
+                    "- /set_destinations <index> <dest...>",
+                    "  Example: /set_destinations 3 -1002222222222=\"🔥 Hot Right Now\"",
+                    "",
+                    "Tip: Twitter/X media expansion happens automatically when messages contain tweet URLs and relay.expand_twitter_links=true.",
+                ]
             )
+            if len(text) <= 3500:
+                await event.reply(text)
+            else:
+                tmp = tempfile.TemporaryDirectory(prefix="help_")
+                try:
+                    path = f"{tmp.name}/help.txt"
+                    with open(path, "w", encoding="utf-8") as f:
+                        f.write(text)
+                    await self.client.send_file(event.chat_id, path, caption="🤖 Help")
+                finally:
+                    tmp.cleanup()
             return
 
         if cmd == "/list_routes":
@@ -958,116 +1124,11 @@ class RelayBot:
                 await event.reply("🤖 routes 为空")
                 return
 
-            entity_cache: dict[int, object] = {}
-            topic_title_cache: dict[tuple[int, int], str] = {}
+            text = await self._build_routes_report(list(routes), args)
+            if not text:
+                await event.reply("🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]")
+                return
 
-            async def _get_entity(chat_id: int):
-                if chat_id in entity_cache:
-                    return entity_cache[chat_id]
-                ent = await self.client.get_entity(chat_id)
-                entity_cache[chat_id] = ent
-                return ent
-
-            def _entity_label(ent) -> str:
-                title = getattr(ent, "title", None)
-                username = getattr(ent, "username", None)
-                if title and username:
-                    return f"{title} (@{username})"
-                if title:
-                    return str(title)
-                if username:
-                    return f"@{username}"
-                return str(getattr(ent, "id", ""))
-
-            async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
-                if top_message_id == 1:
-                    return "General"
-
-                key = (chat_id, top_message_id)
-                if key in topic_title_cache:
-                    return topic_title_cache[key]
-
-                ent = await _get_entity(chat_id)
-                msg = await self.client.get_messages(ent, ids=int(top_message_id))
-                if not msg:
-                    return None
-
-                action = getattr(msg, "action", None)
-                title = getattr(action, "title", None)
-                if not title:
-                    return None
-
-                topic_title_cache[key] = str(title)
-                return str(title)
-
-            out: list[str] = ["🤖 Routes:"]
-
-            for i, r in enumerate(routes, start=1):
-                out.append(f"\n{i})")
-
-                source_chats = [int(x) for x in (r.get("source_chats") or [])]
-                source_topics = [int(x) for x in (r.get("source_topics") or [])]
-                destinations = list(r.get("destinations") or [])
-
-                out.append("  Sources:")
-                for cid in source_chats:
-                    try:
-                        ent = await _get_entity(cid)
-                        out.append(f"    - {cid} | {_entity_label(ent)}")
-                    except Exception:  # noqa: BLE001
-                        out.append(f"    - {cid}")
-
-                    if source_topics:
-                        topic_parts: list[str] = []
-                        for tid in source_topics:
-                            try:
-                                title = await _topic_title(cid, tid)
-                            except Exception:  # noqa: BLE001
-                                title = None
-                            if title:
-                                topic_parts.append(f"{tid} | {title}")
-                            else:
-                                topic_parts.append(str(tid))
-                        out.append("      topics: " + "; ".join(topic_parts))
-                    else:
-                        try:
-                            ent = entity_cache.get(cid) or await _get_entity(cid)
-                            if getattr(ent, "forum", False):
-                                out.append("      topics: ALL")
-                        except Exception:  # noqa: BLE001
-                            pass
-
-                out.append("  Destinations:")
-                for d in destinations:
-                    chat_id = int(d.get("chat_id"))
-                    chat_label = None
-                    try:
-                        ent = await _get_entity(chat_id)
-                        chat_label = _entity_label(ent)
-                    except Exception:  # noqa: BLE001
-                        chat_label = None
-
-                    line = f"    - {chat_id}"
-                    if chat_label:
-                        line += f" | {chat_label}"
-
-                    if d.get("topic_id") is not None:
-                        topic_id = int(d.get("topic_id"))
-                        topic_label = None
-                        try:
-                            topic_label = await _topic_title(chat_id, topic_id)
-                        except Exception:  # noqa: BLE001
-                            topic_label = None
-
-                        line += f" | topic_id={topic_id}"
-                        if topic_label:
-                            line += f" | {topic_label}"
-                    elif d.get("topic_title"):
-                        line += f" | topic_title=\"{d.get('topic_title')}\""
-
-                    out.append(line)
-
-            text = "\n".join(out)
             if len(text) <= 3500:
                 await event.reply(text)
                 return
@@ -1078,6 +1139,29 @@ class RelayBot:
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(text)
                 await self.client.send_file(event.chat_id, path, caption="🤖 Routes 太长，已导出为文件")
+            finally:
+                tmp.cleanup()
+            return
+
+        if cmd == "/export_routes":
+            cfg = self.config_manager.load(force=True)
+            relay = cfg.get("relay", {}) or {}
+            routes = relay.get("routes", []) or []
+            if not routes:
+                await event.reply("🤖 routes 为空")
+                return
+
+            text = await self._build_routes_report(list(routes), args)
+            if not text:
+                await event.reply("🤖 未匹配到 routes。")
+                return
+
+            tmp = tempfile.TemporaryDirectory(prefix="routes_")
+            try:
+                path = f"{tmp.name}/routes.txt"
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(text)
+                await self.client.send_file(event.chat_id, path, caption="🤖 Routes 导出")
             finally:
                 tmp.cleanup()
             return
