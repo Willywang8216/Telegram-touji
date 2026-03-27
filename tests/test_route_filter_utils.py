@@ -5,8 +5,8 @@ from route_filter_utils import filter_routes, parse_route_filters
 
 class TestRouteFilterUtils(unittest.TestCase):
     def test_parse_route_filters(self):
-        f = parse_route_filters('source=-1 dest=-100 topic="Hot" foo')
-        self.assertEqual(f["source"], -1)
+        f = parse_route_filters('source=-1,-2 dest=-100 topic="Hot" foo')
+        self.assertEqual(f["source"], [-1, -2])
         self.assertEqual(f["dest"], -100)
         self.assertEqual(f["topic"], "Hot")
         self.assertEqual(f["terms"], ["foo"])
@@ -25,6 +25,9 @@ class TestRouteFilterUtils(unittest.TestCase):
 
         f = parse_route_filters("source=-1")
         self.assertEqual(len(filter_routes(routes, filters=f)), 1)
+
+        f = parse_route_filters("source=-1,-2")
+        self.assertEqual(len(filter_routes(routes, filters=f)), 2)
 
         f = parse_route_filters("dest=-200")
         self.assertEqual(filter_routes(routes, filters=f)[0]["source_chats"], [-2])

@@ -923,12 +923,6 @@ async def _resolve_message_link(link: str) -> tuple[int, int, int | None]:
 
 
 async def _build_routes_report(routes: list[dict], args: str) -> str | None:
-    filtered = filter_routes(list(routes), filters=parse_route_filters(args or "")) if (args or "").strip() else list(routes)
-    if not filtered:
-        return None
-
-    keep = {id(r) for r in filtered}
-
     entity_cache: dict[int, object] = {}
     topic_title_cache: dict[tuple[int, int], str] = {}
 
@@ -949,6 +943,30 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
         if username:
             return f"@{username}"
         return str(getattr(ent, "id", ""))
+
+    def _internal_chat_id(chat_id: int) -> int | None:
+        # t.me/c/<internal>/<msg_id> uses chat id without the -100 prefix.
+        if str(int(chat_id)).startswith("-100"):
+            return abs(int(chat_id)) - 1000000000000
+        return None
+
+    def _chat_link(ent, chat_id: int) -> str | None:
+        username = getattr(ent, "username", None)
+        if username:
+            return f"https://t.me/{username}"
+        internal = _internal_chat_id(chat_id)
+        if internal is not None:
+            return f"https://t.me/c/{internal}/1"
+        return None
+
+    def _message_link(ent, chat_id: int, msg_id: int) -> str | None:
+        username = getattr(ent, "username", None)
+        if username:
+            return f"https://t.me/{username}/{int(msg_id)}"
+        internal = _internal_chat_id(chat_id)
+        if internal is not None:
+            return f"https://t.me/c/{internal}/{int(msg_id)}"
+        return None
 
     async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
         if top_message_id == 1:
@@ -971,6 +989,42 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
         topic_title_cache[key] = str(title)
         return str(title)
 
+    filtered = list(routes)
+    if (args or "").strip():
+        flt = parse_route_filters(args or "")
+        topic_sub = str(flt.get("topic") or "").casefold().strip() or None
+
+        base = dict(flt)
+        base["topic"] = None
+        filtered = filter_routes(list(routes), filters=base)
+
+        if topic_sub is not None:
+            matched: list[dict] = []
+            for r in filtered:
+                ok = False
+                for d in (r.get("destinations") or []):
+                    if topic_sub in str(d.get("topic_title") or "").casefold():
+                        ok = True
+                        break
+
+                    if d.get("topic_id") is not None and d.get("chat_id") is not None:
+                        try:
+                            title = await _topic_title(int(d.get("chat_id")), int(d.get("topic_id")))
+                        except Exception:  # noqa: BLE001
+                            title = None
+                        if title and topic_sub in str(title).casefold():
+                            ok = True
+                            break
+
+                if ok:
+                    matched.append(r)
+            filtered = matched
+
+    if not filtered:
+        return None
+
+    keep = {id(r) for r in filtered}
+
     out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
     if (args or "").strip():
         out.append(f"Filters: {args}")
@@ -988,11 +1042,22 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
 
         out.append("  Sources:")
         for cid in source_chats:
+            ent = None
+            label = None
+            url = None
             try:
                 ent = await _get_entity(cid)
-                out.append(f"    - {cid} | {_entity_label(ent)}")
+                label = _entity_label(ent)
+                url = _chat_link(ent, cid)
             except Exception:  # noqa: BLE001
-                out.append(f"    - {cid}")
+                ent = None
+
+            line = f"    - {cid}"
+            if label:
+                line += f" | {label}"
+            if url:
+                line += f" | {url}"
+            out.append(line)
 
             if source_topics:
                 topic_parts: list[str] = []
@@ -1001,15 +1066,21 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
                         title = await _topic_title(cid, tid)
                     except Exception:  # noqa: BLE001
                         title = None
+                    part = str(tid)
                     if title:
-                        topic_parts.append(f"{tid} | {title}")
-                    else:
-                        topic_parts.append(str(tid))
+                        part += f" | {title}"
+
+                    if ent is not None:
+                        turl = _message_link(ent, cid, tid)
+                        if turl:
+                            part += f" | {turl}"
+
+                    topic_parts.append(part)
                 out.append("      topics: " + "; ".join(topic_parts))
             else:
                 try:
-                    ent = entity_cache.get(cid) or await _get_entity(cid)
-                    if getattr(ent, "forum", False):
+                    ent2 = ent or (entity_cache.get(cid) or await _get_entity(cid))
+                    if getattr(ent2, "forum", False):
                         out.append("      topics: ALL")
                 except Exception:  # noqa: BLE001
                     pass
@@ -1017,16 +1088,21 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
         out.append("  Destinations:")
         for d in destinations:
             chat_id = int(d.get("chat_id"))
+            ent = None
             chat_label = None
+            chat_url = None
             try:
                 ent = await _get_entity(chat_id)
                 chat_label = _entity_label(ent)
+                chat_url = _chat_link(ent, chat_id)
             except Exception:  # noqa: BLE001
-                chat_label = None
+                ent = None
 
             line = f"    - {chat_id}"
             if chat_label:
                 line += f" | {chat_label}"
+            if chat_url:
+                line += f" | {chat_url}"
 
             if d.get("topic_id") is not None:
                 topic_id = int(d.get("topic_id"))
@@ -1039,6 +1115,10 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
                 line += f" | topic_id={topic_id}"
                 if topic_label:
                     line += f" | {topic_label}"
+                if ent is not None:
+                    turl = _message_link(ent, chat_id, topic_id)
+                    if turl:
+                        line += f" | {turl}"
             elif d.get("topic_title"):
                 line += f" | topic_title=\"{d.get('topic_title')}\""
 
@@ -1353,10 +1433,11 @@ async def _cmd_help(event):
             "",
             "Routes viewing / filtering:",
             "- /list_routes [filters...]",
-            "  Filters: source=<id> dest=<id> topic=<substring> topic_id=<id> + free text terms",
+            "  Filters: source=<id[,..]> dest=<id[,..]> topic=<substring> topic_id=<id> + free text terms",
             "  Examples:",
             "    /list_routes",
             "    /list_routes source=-1001234567890",
+            "    /list_routes source=-1001234567890,-1009998887776",
             "    /list_routes dest=-1002222222222",
             "    /list_routes topic=\"Hot\"",
             "- /export_routes [filters...]  (always sends a routes.txt file)",
@@ -1533,8 +1614,8 @@ async def main():
 
             profile = tokens[0]
             source_chat_id = int(tokens[1])
-            bot = tokens[2].strip()
-            if not bot.startswith("@"):  
+            bot = "@" + tokens[2].strip().lstrip("@")
+            if bot == "@":
                 await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                 return
 

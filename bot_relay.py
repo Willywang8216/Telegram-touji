@@ -938,12 +938,6 @@ class RelayBot:
         self._maybe_log_topic_config_warning(self.settings)
 
     async def _build_routes_report(self, routes: list[dict[str, Any]], args: str) -> str | None:
-        filtered = filter_routes(list(routes), filters=parse_route_filters(args or "")) if (args or "").strip() else list(routes)
-        if not filtered:
-            return None
-
-        keep = {id(r) for r in filtered}
-
         entity_cache: dict[int, object] = {}
         topic_title_cache: dict[tuple[int, int], str] = {}
 
@@ -964,6 +958,29 @@ class RelayBot:
             if username:
                 return f"@{username}"
             return str(getattr(ent, "id", ""))
+
+        def _internal_chat_id(chat_id: int) -> int | None:
+            if str(int(chat_id)).startswith("-100"):
+                return abs(int(chat_id)) - 1000000000000
+            return None
+
+        def _chat_link(ent, chat_id: int) -> str | None:
+            username = getattr(ent, "username", None)
+            if username:
+                return f"https://t.me/{username}"
+            internal = _internal_chat_id(chat_id)
+            if internal is not None:
+                return f"https://t.me/c/{internal}/1"
+            return None
+
+        def _message_link(ent, chat_id: int, msg_id: int) -> str | None:
+            username = getattr(ent, "username", None)
+            if username:
+                return f"https://t.me/{username}/{int(msg_id)}"
+            internal = _internal_chat_id(chat_id)
+            if internal is not None:
+                return f"https://t.me/c/{internal}/{int(msg_id)}"
+            return None
 
         async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
             if top_message_id == 1:
@@ -986,6 +1003,42 @@ class RelayBot:
             topic_title_cache[key] = str(title)
             return str(title)
 
+        filtered = list(routes)
+        if (args or "").strip():
+            flt = parse_route_filters(args or "")
+            topic_sub = str(flt.get("topic") or "").casefold().strip() or None
+
+            base = dict(flt)
+            base["topic"] = None
+            filtered = filter_routes(list(routes), filters=base)
+
+            if topic_sub is not None:
+                matched: list[dict[str, Any]] = []
+                for r in filtered:
+                    ok = False
+                    for d in (r.get("destinations") or []):
+                        if topic_sub in str(d.get("topic_title") or "").casefold():
+                            ok = True
+                            break
+
+                        if d.get("topic_id") is not None and d.get("chat_id") is not None:
+                            try:
+                                title = await _topic_title(int(d.get("chat_id")), int(d.get("topic_id")))
+                            except Exception:  # noqa: BLE001
+                                title = None
+                            if title and topic_sub in str(title).casefold():
+                                ok = True
+                                break
+
+                    if ok:
+                        matched.append(r)
+                filtered = matched
+
+        if not filtered:
+            return None
+
+        keep = {id(r) for r in filtered}
+
         out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
         if (args or "").strip():
             out.append(f"Filters: {args}")
@@ -1003,11 +1056,22 @@ class RelayBot:
 
             out.append("  Sources:")
             for cid in source_chats:
+                ent = None
+                label = None
+                url = None
                 try:
                     ent = await _get_entity(cid)
-                    out.append(f"    - {cid} | {_entity_label(ent)}")
+                    label = _entity_label(ent)
+                    url = _chat_link(ent, cid)
                 except Exception:  # noqa: BLE001
-                    out.append(f"    - {cid}")
+                    ent = None
+
+                line = f"    - {cid}"
+                if label:
+                    line += f" | {label}"
+                if url:
+                    line += f" | {url}"
+                out.append(line)
 
                 if source_topics:
                     topic_parts: list[str] = []
@@ -1016,15 +1080,22 @@ class RelayBot:
                             title = await _topic_title(cid, tid)
                         except Exception:  # noqa: BLE001
                             title = None
+
+                        part = str(tid)
                         if title:
-                            topic_parts.append(f"{tid} | {title}")
-                        else:
-                            topic_parts.append(str(tid))
+                            part += f" | {title}"
+
+                        if ent is not None:
+                            turl = _message_link(ent, cid, tid)
+                            if turl:
+                                part += f" | {turl}"
+
+                        topic_parts.append(part)
                     out.append("      topics: " + "; ".join(topic_parts))
                 else:
                     try:
-                        ent = entity_cache.get(cid) or await _get_entity(cid)
-                        if getattr(ent, "forum", False):
+                        ent2 = ent or (entity_cache.get(cid) or await _get_entity(cid))
+                        if getattr(ent2, "forum", False):
                             out.append("      topics: ALL")
                     except Exception:  # noqa: BLE001
                         pass
@@ -1032,16 +1103,21 @@ class RelayBot:
             out.append("  Destinations:")
             for d in destinations:
                 chat_id = int(d.get("chat_id"))
+                ent = None
                 chat_label = None
+                chat_url = None
                 try:
                     ent = await _get_entity(chat_id)
                     chat_label = _entity_label(ent)
+                    chat_url = _chat_link(ent, chat_id)
                 except Exception:  # noqa: BLE001
-                    chat_label = None
+                    ent = None
 
                 line = f"    - {chat_id}"
                 if chat_label:
                     line += f" | {chat_label}"
+                if chat_url:
+                    line += f" | {chat_url}"
 
                 if d.get("topic_id") is not None:
                     topic_id = int(d.get("topic_id"))
@@ -1054,6 +1130,10 @@ class RelayBot:
                     line += f" | topic_id={topic_id}"
                     if topic_label:
                         line += f" | {topic_label}"
+                    if ent is not None:
+                        turl = _message_link(ent, chat_id, topic_id)
+                        if turl:
+                            line += f" | {turl}"
                 elif d.get("topic_title"):
                     line += f" | topic_title=\"{d.get('topic_title')}\""
 
@@ -1071,16 +1151,14 @@ class RelayBot:
                     "",
                     "Routes viewing / filtering:",
                     "- /list_routes [filters...]",
-                    "  Filters: source=<id> dest=<id> topic=<substring> topic_id=<id> + free text terms",
+                    "  Filters: source=<id[,..]> dest=<id[,..]> topic=<substring> topic_id=<id> + free text terms",
                     "  Examples:",
                     "    /list_routes",
                     "    /list_routes source=-1001234567890",
+                    "    /list_routes source=-1001234567890,-1009999999999",
                     "    /list_routes dest=-1002222222222",
                     "    /list_routes topic=\"Hot\"",
                     "- /export_routes [filters...]  (always sends a routes.txt file)",
-                    "  Examples:",
-                    "    /export_routes",
-                    "    /export_routes source=-1001234567890",
                     "",
                     "Route editing:",
                     "- /add_route <source_chat[,..]> [source_topic=<top_msg_id>] <dest...>",
@@ -1088,19 +1166,17 @@ class RelayBot:
                     "    <dest_chat_id>=\"<topic_title>\"",
                     "    <dest_chat_id>@<topic_top_message_id>",
                     "    <dest_chat_id>",
-                    "  Examples:",
-                    "    /add_route -1001234567890 -1002222222222=\"🔥 Hot Right Now\" -1003333333333=\"🔥 今日爆熱\"",
-                    "    /add_route -1001234567890 source_topic=777 -1002222222222=\"Topic A\"",
                     "  Link-based route form:",
                     "    /add_route <source_message_link> <dest_message_link> [dest_message_link...]",
-                    "  Example:",
-                    "    /add_route https://t.me/c/111/222/333 https://t.me/c/444/555/666",
                     "- /remove_route <index>",
-                    "  Example: /remove_route 3",
                     "- /set_destinations <index> <dest...>",
-                    "  Example: /set_destinations 3 -1002222222222=\"🔥 Hot Right Now\"",
                     "",
-                    "Tip: Twitter/X media expansion happens automatically when messages contain tweet URLs and relay.expand_twitter_links=true.",
+                    "Twitter/X watch (poll profiles via userbot):",
+                    "- /list_x_watch",
+                    "- /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/...]",
+                    "- /remove_x_watch <index>",
+                    "",
+                    "Note: userbot (telegram_bot.py) must be running and logged in. It will poll X and DM tweet URLs to <@relay_bot>.",
                 ]
             )
             if len(text) <= 3500:
@@ -1114,6 +1190,137 @@ class RelayBot:
                     await self.client.send_file(event.chat_id, path, caption="🤖 Help")
                 finally:
                     tmp.cleanup()
+            return
+
+        if cmd == "/list_x_watch":
+            cfg = self.config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            enabled = bool(tw.get("enabled", False))
+            sources = tw.get("sources", []) or []
+
+            if not sources:
+                await event.reply(f"🤖 twitter_watch: enabled={enabled} | sources=0")
+                return
+
+            lines = [f"🤖 twitter_watch: enabled={enabled}", ""]
+            for i, s in enumerate(sources, start=1):
+                if not isinstance(s, dict):
+                    continue
+                profile = str(s.get("profile") or s.get("account") or s.get("url") or "")
+                source_chat_id = s.get("source_chat_id")
+                target_bot = s.get("target_bot")
+                interval = s.get("poll_interval_sec", 300)
+                fetch_limit = s.get("fetch_limit", 30)
+                lines.append(
+                    f"{i}) {profile} | source_chat_id={source_chat_id} | target_bot={target_bot} | interval={interval}s | fetch_limit={fetch_limit}"
+                )
+
+            await event.reply("\n".join(lines)[:3500])
+            return
+
+        if cmd == "/add_x_watch":
+            tokens = shlex.split(args or "")
+            if len(tokens) < 3:
+                await event.reply(
+                    "🤖 用法: /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
+                    "提示: source_chat_id 可以是任意负数，用于 relay.routes 匹配。"
+                )
+                return
+
+            profile = tokens[0]
+            source_chat_id = int(tokens[1])
+            bot = "@" + tokens[2].strip().lstrip("@")
+
+            kv: dict[str, str] = {}
+            for t in tokens[3:]:
+                if "=" not in t:
+                    continue
+                k, v = t.split("=", 1)
+                kv[k.strip()] = v.strip()
+
+            poll_interval_sec = int(kv.get("poll_interval_sec") or kv.get("interval") or 300)
+            fetch_limit = int(kv.get("fetch_limit") or kv.get("limit") or 30)
+            archive_file = kv.get("archive_file")
+
+            try:
+                ent = await self.client.get_entity(bot)
+                if not getattr(ent, "bot", False):
+                    await event.reply("🤖 错误: 目标必须是机器人账号（Bot），不能是频道/群/普通用户")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
+                return
+
+            cfg = self.config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            new_entry: dict[str, Any] = {
+                "profile": str(profile),
+                "source_chat_id": int(source_chat_id),
+                "target_bot": bot,
+                "poll_interval_sec": max(30, int(poll_interval_sec)),
+                "fetch_limit": max(1, min(int(fetch_limit), 200)),
+            }
+            if archive_file:
+                new_entry["archive_file"] = str(archive_file)
+
+            updated = False
+            for i, s in enumerate(sources):
+                if not isinstance(s, dict):
+                    continue
+                existing_profile = str(s.get("profile") or s.get("account") or s.get("url") or "")
+                try:
+                    existing_source = int(s.get("source_chat_id") or 0)
+                except Exception:  # noqa: BLE001
+                    existing_source = 0
+
+                if existing_profile == str(profile) and existing_source == int(source_chat_id):
+                    sources[i] = new_entry
+                    updated = True
+                    break
+
+            if not updated:
+                sources.append(new_entry)
+
+            tw["enabled"] = True
+            tw["sources"] = sources
+            cfg["twitter_watch"] = tw
+            self.config_manager.save(cfg)
+
+            await event.reply(
+                "🤖 已添加 twitter_watch source（enabled=true）。\n"
+                "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。"
+            )
+            return
+
+        if cmd == "/remove_x_watch":
+            tokens = shlex.split(args or "")
+            if len(tokens) != 1:
+                await event.reply("🤖 用法: /remove_x_watch <index>")
+                return
+
+            idx = int(tokens[0]) - 1
+            cfg = self.config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            if idx < 0 or idx >= len(sources):
+                await event.reply("🤖 错误: index 超出范围")
+                return
+
+            removed = sources.pop(idx)
+            tw["sources"] = sources
+            cfg["twitter_watch"] = tw
+            self.config_manager.save(cfg)
+
+            profile = None
+            try:
+                profile = str((removed or {}).get("profile") or "")
+            except Exception:  # noqa: BLE001
+                profile = None
+
+            await event.reply(f"🤖 已移除 twitter_watch: {profile or '(unknown)'}")
             return
 
         if cmd == "/list_routes":

@@ -7,15 +7,25 @@ def parse_route_filters(args: str) -> dict[str, Any]:
     """Parse /list_routes and /export_routes filters.
 
     Supported tokens (shlex-split):
-    - source=<chat_id>
-    - dest=<chat_id>
+    - source=<chat_id>[,<chat_id>...]
+    - dest=<chat_id>[,<chat_id>...]
     - topic=<substring>
     - topic_id=<top_message_id>
     - any other token becomes a free-text term
     """
 
     tokens = shlex.split(args or "")
-    out: dict[str, Any] = {"source": None, "dest": None, "topic": None, "topic_id": None, "terms": []}
+    out: dict[str, Any] = {"source": [], "dest": [], "topic": None, "topic_id": None, "terms": []}
+
+    def _extend_int_list(key: str, raw: str) -> None:
+        for part in str(raw or "").split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                out[key].append(int(part))
+            except Exception:  # noqa: BLE001
+                continue
 
     for tok in tokens:
         if not tok:
@@ -28,17 +38,11 @@ def parse_route_filters(args: str) -> dict[str, Any]:
                 continue
 
             if k in {"source", "src"}:
-                try:
-                    out["source"] = int(v)
-                except Exception:  # noqa: BLE001
-                    continue
+                _extend_int_list("source", v)
                 continue
 
             if k in {"dest", "dst"}:
-                try:
-                    out["dest"] = int(v)
-                except Exception:  # noqa: BLE001
-                    continue
+                _extend_int_list("dest", v)
                 continue
 
             if k in {"topic"}:
@@ -58,6 +62,17 @@ def parse_route_filters(args: str) -> dict[str, Any]:
         out["terms"].append(tok)
 
     out["terms"] = [str(x) for x in (out.get("terms") or []) if str(x).strip()]
+
+    if not out["source"]:
+        out["source"] = None
+    elif len(out["source"]) == 1:
+        out["source"] = out["source"][0]
+
+    if not out["dest"]:
+        out["dest"] = None
+    elif len(out["dest"]) == 1:
+        out["dest"] = out["dest"][0]
+
     return out
 
 
@@ -68,9 +83,27 @@ def _route_blob(route: dict[str, Any]) -> str:
         return str(route)
 
 
+def _as_int_list(value: Any) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        out: list[int] = []
+        for x in value:
+            try:
+                out.append(int(x))
+            except Exception:  # noqa: BLE001
+                continue
+        return out
+    try:
+        return [int(value)]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def filter_routes(routes: list[dict[str, Any]], *, filters: dict[str, Any]) -> list[dict[str, Any]]:
-    src = filters.get("source")
-    dest = filters.get("dest")
+    srcs = _as_int_list(filters.get("source"))
+    dests_filter = _as_int_list(filters.get("dest"))
+
     topic = str(filters.get("topic") or "").casefold().strip() or None
     topic_id = filters.get("topic_id")
 
@@ -79,22 +112,26 @@ def filter_routes(routes: list[dict[str, Any]], *, filters: dict[str, Any]) -> l
     out: list[dict[str, Any]] = []
 
     for r in routes or []:
-        if src is not None and src not in (r.get("source_chats") or []):
+        if srcs and not any(int(s) in (r.get("source_chats") or []) for s in srcs):
             continue
 
-        if dest is not None:
-            dests = r.get("destinations") or []
-            if not any(int(d.get("chat_id")) == int(dest) for d in dests if d.get("chat_id") is not None):
+        if dests_filter:
+            rdests = r.get("destinations") or []
+            if not any(
+                int(d.get("chat_id")) in dests_filter
+                for d in rdests
+                if d.get("chat_id") is not None
+            ):
                 continue
 
         if topic_id is not None:
-            dests = r.get("destinations") or []
-            if not any(int(d.get("topic_id")) == int(topic_id) for d in dests if d.get("topic_id") is not None):
+            rdests = r.get("destinations") or []
+            if not any(int(d.get("topic_id")) == int(topic_id) for d in rdests if d.get("topic_id") is not None):
                 continue
 
         if topic is not None:
-            dests = r.get("destinations") or []
-            if not any(topic in str(d.get("topic_title") or "").casefold() for d in dests):
+            rdests = r.get("destinations") or []
+            if not any(topic in str(d.get("topic_title") or "").casefold() for d in rdests):
                 continue
 
         if terms:
