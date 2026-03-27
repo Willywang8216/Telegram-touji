@@ -1424,6 +1424,8 @@ async def _cmd_help(event):
         [
             "🤖 Userbot help (DM commands to this userbot; recommended: Saved Messages)",
             "",
+            "Tip: For easiest route management, DM your relay bot and send /start to use the interactive menu.",
+            "",
             "Listen management:",
             "- /join <chat_link_or_username>",
             "  Examples:",

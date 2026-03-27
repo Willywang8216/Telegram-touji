@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from telethon import TelegramClient, events, functions, types, utils
+from telethon import Button, TelegramClient, events, functions, types, utils
 
 from command_utils import parse_command
 from common_config import ConfigManager, load_relay_settings
@@ -337,6 +337,9 @@ class RelayBot:
         # Keyed by (chat_id, grouped_id) to avoid collisions across different private senders.
         self.media_group_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self.media_group_lock = asyncio.Lock()
+
+        # Simple per-user wizard state for inline-menu flows (routes management).
+        self._menu_state: dict[int, dict[str, Any]] = {}
 
     def current_settings(self) -> dict[str, Any]:
         if self.config_manager.reload_if_changed():
@@ -943,6 +946,239 @@ class RelayBot:
         self.settings = load_relay_settings(self.config_manager)
         self._maybe_log_topic_config_warning(self.settings)
 
+    def _menu_buttons(self, menu: str) -> list[list[Any]]:
+        menu = (menu or "main").strip().lower()
+
+        if menu == "routes":
+            return [
+                [Button.inline("📋 List", b"routes:list"), Button.inline("⬇️ Export", b"routes:export")],
+                [Button.inline("➕ Add", b"routes:add"), Button.inline("➖ Remove", b"routes:remove")],
+                [Button.inline("✏️ Set destinations", b"routes:set_dest")],
+                [Button.inline("⬅️ Back", b"menu:main")],
+            ]
+
+        if menu == "xwatch":
+            return [
+                [Button.inline("📋 List watches", b"xwatch:list")],
+                [Button.inline("⬅️ Back", b"menu:main")],
+            ]
+
+        if menu == "wizard_cancel":
+            return [[Button.inline("Cancel", b"wizard:cancel")]]
+
+        # main
+        return [
+            [Button.inline("Routes", b"menu:routes"), Button.inline("X Watch", b"menu:xwatch")],
+            [Button.inline("Help", b"menu:help")],
+        ]
+
+    def _menu_text(self, menu: str) -> str:
+        menu = (menu or "main").strip().lower()
+
+        if menu == "routes":
+            return "\n".join(
+                [
+                    "🤖 Routes menu",
+                    "",
+                    "You can use buttons (wizard) or type commands directly:",
+                    "- /list_routes [filters...]",
+                    "- /add_route ...",
+                    "- /remove_route <index>",
+                    "- /set_destinations <index> ...",
+                ]
+            )
+
+        if menu == "xwatch":
+            return "\n".join(
+                [
+                    "🤖 Twitter/X watch menu",
+                    "",
+                    "List current watches with the button below, or use commands:",
+                    "- /list_x_watch",
+                    "- /add_x_watch ...",
+                    "- /remove_x_watch <index>",
+                    "",
+                    "Note: the userbot (telegram_bot.py) must be running/logged-in to poll X.",
+                ]
+            )
+
+        if menu == "help":
+            return "\n".join(
+                [
+                    "🤖 Help",
+                    "",
+                    "This relay bot forwards what it receives (from userbot) into your configured routes.",
+                    "",
+                    "Quick tips:",
+                    "- Use /start to open the interactive menu.",
+                    "- Use /list_routes to check current routing.",
+                    "- Filters: source=<id[,..]> dest=<id[,..]> topic=<substring> topic_id=<id>",
+                    "",
+                    "Advanced: send /help for full command list (this message) and then use the buttons.",
+                ]
+            )
+
+        return "\n".join(
+            [
+                "🤖 Control panel",
+                "",
+                "Choose an action below. (You can still type commands anytime.)",
+            ]
+        )
+
+    async def _send_menu_message(self, chat_id: int, *, menu: str = "main") -> None:
+        await self.client.send_message(chat_id, message=self._menu_text(menu), buttons=self._menu_buttons(menu))
+
+    async def _send_routes_report(self, chat_id: int, args: str = "") -> None:
+        cfg = self.config_manager.load(force=True)
+        relay = cfg.get("relay", {}) or {}
+        routes = relay.get("routes", []) or []
+        if not routes:
+            await self.client.send_message(chat_id, message="🤖 routes 为空")
+            return
+
+        text = await self._build_routes_report(list(routes), args)
+        if not text:
+            await self.client.send_message(chat_id, message="🤖 未匹配到 routes。")
+            return
+
+        if len(text) <= 3500:
+            await self.client.send_message(chat_id, message=text)
+            return
+
+        tmp = tempfile.TemporaryDirectory(prefix="routes_")
+        try:
+            path = f"{tmp.name}/routes.txt"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            await self.client.send_file(chat_id, path, caption="🤖 Routes 太长，已导出为文件")
+        finally:
+            tmp.cleanup()
+
+    async def _send_routes_export(self, chat_id: int, args: str = "") -> None:
+        cfg = self.config_manager.load(force=True)
+        relay = cfg.get("relay", {}) or {}
+        routes = relay.get("routes", []) or []
+        if not routes:
+            await self.client.send_message(chat_id, message="🤖 routes 为空")
+            return
+
+        text = await self._build_routes_report(list(routes), args)
+        if not text:
+            await self.client.send_message(chat_id, message="🤖 未匹配到 routes。")
+            return
+
+        tmp = tempfile.TemporaryDirectory(prefix="routes_")
+        try:
+            path = f"{tmp.name}/routes.txt"
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(text)
+            await self.client.send_file(chat_id, path, caption="🤖 Routes 导出")
+        finally:
+            tmp.cleanup()
+
+    async def _send_x_watch_list(self, chat_id: int) -> None:
+        cfg = self.config_manager.load(force=True)
+        tw = cfg.get("twitter_watch", {}) or {}
+        enabled = bool(tw.get("enabled", False))
+        sources = tw.get("sources", []) or []
+
+        if not sources:
+            await self.client.send_message(chat_id, message=f"🤖 twitter_watch: enabled={enabled} | sources=0")
+            return
+
+        lines = [f"🤖 twitter_watch: enabled={enabled}", ""]
+        for i, s in enumerate(sources, start=1):
+            if not isinstance(s, dict):
+                continue
+            profile = str(s.get("profile") or s.get("account") or s.get("url") or "")
+            source_chat_id = s.get("source_chat_id")
+            target_bot = s.get("target_bot")
+            interval = s.get("poll_interval_sec", 300)
+            fetch_limit = s.get("fetch_limit", 30)
+            lines.append(
+                f"{i}) {profile} | source_chat_id={source_chat_id} | target_bot={target_bot} | interval={interval}s | fetch_limit={fetch_limit}"
+            )
+
+        await self.client.send_message(chat_id, message="\n".join(lines)[:3500])
+
+    async def handle_callback(self, event) -> None:
+        settings = self.current_settings()
+        allowed_sender = int(settings.get("master_account_id", 0) or 0)
+        if allowed_sender and getattr(event, "sender_id", None) != allowed_sender:
+            await event.answer("Not allowed", alert=False)
+            return
+
+        data = getattr(event, "data", b"") or b""
+        try:
+            key = data.decode("utf-8", errors="ignore")
+        except Exception:  # noqa: BLE001
+            key = ""
+
+        await event.answer()
+
+        sender_id = int(getattr(event, "sender_id", 0) or 0)
+
+        if key == "menu:main":
+            self._menu_state.pop(sender_id, None)
+            await event.edit(self._menu_text("main"), buttons=self._menu_buttons("main"))
+            return
+
+        if key == "menu:routes":
+            self._menu_state.pop(sender_id, None)
+            await event.edit(self._menu_text("routes"), buttons=self._menu_buttons("routes"))
+            return
+
+        if key == "menu:xwatch":
+            self._menu_state.pop(sender_id, None)
+            await event.edit(self._menu_text("xwatch"), buttons=self._menu_buttons("xwatch"))
+            return
+
+        if key == "menu:help":
+            await event.edit(self._menu_text("help"), buttons=self._menu_buttons("main"))
+            return
+
+        if key == "wizard:cancel":
+            self._menu_state.pop(sender_id, None)
+            await event.edit(self._menu_text("routes"), buttons=self._menu_buttons("routes"))
+            return
+
+        if key == "routes:list":
+            await self._send_routes_report(int(event.chat_id), "")
+            return
+
+        if key == "routes:export":
+            await self._send_routes_export(int(event.chat_id), "")
+            return
+
+        if key == "routes:add":
+            self._menu_state[sender_id] = {"step": "add_route_source"}
+            await event.edit(
+                "🤖 Add route\n\nSend the SOURCE as a chat_id (e.g. -100...) or a Telegram message link.",
+                buttons=self._menu_buttons("wizard_cancel"),
+            )
+            return
+
+        if key == "routes:remove":
+            self._menu_state[sender_id] = {"step": "remove_route_index"}
+            await event.edit(
+                "🤖 Remove route\n\nSend the route index number (from /list_routes).",
+                buttons=self._menu_buttons("wizard_cancel"),
+            )
+            return
+
+        if key == "routes:set_dest":
+            self._menu_state[sender_id] = {"step": "set_dest_index"}
+            await event.edit(
+                "🤖 Set destinations\n\nSend the route index number (from /list_routes).",
+                buttons=self._menu_buttons("wizard_cancel"),
+            )
+            return
+
+        if key == "xwatch:list":
+            await self._send_x_watch_list(int(event.chat_id))
+            return
+
     async def _build_routes_report(self, routes: list[dict[str, Any]], args: str) -> str | None:
         entity_cache: dict[int, object] = {}
         topic_title_cache: dict[tuple[int, int], str] = {}
@@ -1150,10 +1386,18 @@ class RelayBot:
     async def _handle_command(self, event, stripped_text: str) -> None:
         cmd, args = parse_command(stripped_text)
 
-        if cmd in {"/help", "/start"}:
+        if cmd in {"/start", "/menu"}:
+            self._menu_state.pop(int(getattr(event, "sender_id", 0) or 0), None)
+            await self._send_menu_message(int(event.chat_id), menu="main")
+            return
+
+        if cmd == "/help":
+            self._menu_state.pop(int(getattr(event, "sender_id", 0) or 0), None)
             text = "\n".join(
                 [
                     "🤖 RelayBot help (DM commands to this bot)",
+                    "",
+                    "Tip: use /start to open the interactive menu for route management.",
                     "",
                     "Routes viewing / filtering:",
                     "- /list_routes [filters...]",
@@ -1161,7 +1405,6 @@ class RelayBot:
                     "  Examples:",
                     "    /list_routes",
                     "    /list_routes source=-1001234567890",
-                    "    /list_routes source=-1001234567890,-1009999999999",
                     "    /list_routes dest=-1002222222222",
                     "    /list_routes topic=\"Hot\"",
                     "- /export_routes [filters...]  (always sends a routes.txt file)",
@@ -1179,21 +1422,22 @@ class RelayBot:
                     "",
                     "Twitter/X watch (poll profiles via userbot):",
                     "- /list_x_watch",
-                    "- /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/...]",
+                    "- /add_x_watch (old) <x_profile> <source_chat_id> <@relay_bot> ...",
+                    "- /add_x_watch (new) <x_profile> <dest_message_link> [dest_message_link...] ...",
                     "- /remove_x_watch <index>",
                     "",
-                    "Note: userbot (telegram_bot.py) must be running and logged in. It will poll X and DM tweet URLs to <@relay_bot>.",
+                    "Note: userbot (telegram_bot.py) must be running and logged in. It will poll X and DM tweet URLs to this bot.",
                 ]
             )
             if len(text) <= 3500:
-                await event.reply(text)
+                await event.reply(text, buttons=self._menu_buttons("main"))
             else:
                 tmp = tempfile.TemporaryDirectory(prefix="help_")
                 try:
                     path = f"{tmp.name}/help.txt"
                     with open(path, "w", encoding="utf-8") as f:
                         f.write(text)
-                    await self.client.send_file(event.chat_id, path, caption="🤖 Help")
+                    await self.client.send_file(event.chat_id, path, caption="🤖 Help", buttons=self._menu_buttons("main"))
                 finally:
                     tmp.cleanup()
             return
@@ -1672,6 +1916,71 @@ class RelayBot:
 
         await event.reply("🤖 未知命令。发送 /help 查看用法")
 
+    async def _handle_menu_input(self, event, text: str) -> None:
+        sender_id = int(getattr(event, "sender_id", 0) or 0)
+        state = self._menu_state.get(sender_id) or {}
+        step = str(state.get("step") or "")
+
+        s = (text or "").strip()
+        if not s:
+            await event.reply("🤖 请输入内容，或点 Cancel 取消。")
+            return
+
+        if s.lower() in {"/cancel", "cancel"}:
+            self._menu_state.pop(sender_id, None)
+            await self._send_menu_message(int(event.chat_id), menu="routes")
+            return
+
+        if step == "add_route_source":
+            state["source"] = s
+            state["step"] = "add_route_dest"
+            self._menu_state[sender_id] = state
+            await event.reply(
+                "🤖 Add route\n\n"
+                "Now send DESTINATIONS (same formats as /add_route). Examples:\n"
+                "- -1001234567890=\"Topic Title\"\n"
+                "- -1001234567890@777\n"
+                "- https://t.me/c/123456/777/888\n\n"
+                "Optional: include source_topic=777 before destinations.\n"
+                "Send /cancel to abort."
+            )
+            return
+
+        if step == "add_route_dest":
+            source = str(state.get("source") or "").strip()
+            self._menu_state.pop(sender_id, None)
+            await self._handle_command(event, f"/add_route {source} {s}")
+            await self._send_menu_message(int(event.chat_id), menu="routes")
+            return
+
+        if step == "remove_route_index":
+            self._menu_state.pop(sender_id, None)
+            await self._handle_command(event, f"/remove_route {s}")
+            await self._send_menu_message(int(event.chat_id), menu="routes")
+            return
+
+        if step == "set_dest_index":
+            state["index"] = s
+            state["step"] = "set_dest_values"
+            self._menu_state[sender_id] = state
+            await event.reply(
+                "🤖 Set destinations\n\n"
+                "Now send the new destinations for this route (same formats as /set_destinations).\n"
+                "Example: -1001234567890=\"Topic Title\" -1009999999999@777\n\n"
+                "Send /cancel to abort."
+            )
+            return
+
+        if step == "set_dest_values":
+            idx = str(state.get("index") or "").strip()
+            self._menu_state.pop(sender_id, None)
+            await self._handle_command(event, f"/set_destinations {idx} {s}")
+            await self._send_menu_message(int(event.chat_id), menu="routes")
+            return
+
+        self._menu_state.pop(sender_id, None)
+        await event.reply("🤖 菜单状态已重置。请发送 /start 重新打开菜单。")
+
     async def handle(self, event) -> None:
         settings = self.current_settings()
 
@@ -1695,6 +2004,11 @@ class RelayBot:
             return
         if stripped_text.startswith("🤖"):
             log_event(self.logger, logging.INFO, "system_reply_blocked", text=stripped_text)
+            return
+
+        sender_id = int(getattr(event, "sender_id", 0) or 0)
+        if sender_id in self._menu_state:
+            await self._handle_menu_input(event, stripped_text)
             return
 
         msg = event.message
@@ -2275,6 +2589,10 @@ async def main() -> None:
     @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
     async def handler(event):
         await bot.handle(event)
+
+    @client.on(events.CallbackQuery())
+    async def callback_handler(event):
+        await bot.handle_callback(event)
 
     log_event(
         logger,
