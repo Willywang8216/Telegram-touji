@@ -32,6 +32,13 @@ class TestTelegramLinkUtils(unittest.TestCase):
         self.assertEqual(p.message_id, 999)
         self.assertIsNone(p.topic_id)
 
+    def test_parse_trailing_punctuation(self):
+        p = parse_message_link("https://t.me/somegroup/999)")
+        self.assertIsNotNone(p)
+        assert p is not None
+        self.assertEqual(p.chat, "somegroup")
+        self.assertEqual(p.message_id, 999)
+
     def test_parse_username_topic_link(self):
         p = parse_message_link("t.me/somegroup/777/888")
         self.assertIsNotNone(p)

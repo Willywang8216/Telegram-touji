@@ -1726,7 +1726,12 @@ async def main():
 
                 for t in dest_tokens:
                     if looks_like_message_link(t):
-                        chat_id, _, topic_top = await _resolve_message_link(t)
+                        try:
+                            chat_id, _, topic_top = await _resolve_message_link(t)
+                        except Exception as exc:  # noqa: BLE001
+                            await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
+                            return
+
                         dest: dict = {"chat_id": int(chat_id)}
                         if topic_top is not None:
                             dest["topic_id"] = int(topic_top)
@@ -1736,6 +1741,13 @@ async def main():
             else:
                 # New style: <profile> <dest_link...> [poll_interval_sec=...] ...
                 bot = kv.get("relay_bot") or kv.get("bot") or ""
+
+                # Also allow passing the relay bot as a positional "@BotUserName" token.
+                pos_bot = next((p for p in positional if str(p).strip().startswith("@")), None)
+                if pos_bot:
+                    positional = [p for p in positional if p != pos_bot]
+                    bot = str(pos_bot)
+
                 if bot:
                     bot = "@" + str(bot).strip().lstrip("@")
                 else:
@@ -1751,7 +1763,12 @@ async def main():
 
                 for t in positional:
                     if looks_like_message_link(t):
-                        chat_id, _, topic_top = await _resolve_message_link(t)
+                        try:
+                            chat_id, _, topic_top = await _resolve_message_link(t)
+                        except Exception as exc:  # noqa: BLE001
+                            await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
+                            return
+
                         dest: dict = {"chat_id": int(chat_id)}
                         if topic_top is not None:
                             dest["topic_id"] = int(topic_top)

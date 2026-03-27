@@ -24,6 +24,10 @@ def parse_message_link(value: str) -> ParsedMessageLink | None:
     if not s:
         return None
 
+    # Telegram clients sometimes include trailing punctuation or direction marks
+    # when users copy-paste links (e.g. ".../12345)" or ".../12345\u200e").
+    s = s.rstrip(").,;:!?]}'\"”’›»\u200e\u200f\u202a\u202b\u202c\u202d\u202e")
+
     if s.startswith("t.me/") or s.startswith("telegram.me/"):
         s = "https://" + s
 
