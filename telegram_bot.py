@@ -727,7 +727,7 @@ async def handler(event):
                 media_group_cache[key]["source_topic_id"] = source_topic_id
 
             if is_gif_or_sticker or is_disallowed_doc or is_location or is_blocked or too_many_links:
- media_group_cache[key]["blocked"] = True
+                media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
             if media_group_cache[key]["task"]:
