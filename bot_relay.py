@@ -1226,23 +1226,121 @@ class RelayBot:
 
         if cmd == "/add_x_watch":
             tokens = shlex.split(args or "")
-            if len(tokens) < 3:
+            if not tokens:
                 await event.reply(
-                    "🤖 用法: /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
-                    "提示: source_chat_id 可以是任意负数，用于 relay.routes 匹配。"
+                    "🤖 用法(旧): /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
+                    "🤖 用法(新): /add_x_watch <x_profile_or_username> <dest_message_link> [dest_message_link...] [poll_interval_sec=...] [fetch_limit=...] [archive_file=...]\n"
+                    "提示: 新用法会自动生成 source_chat_id，并自动添加 route。"
                 )
                 return
 
-            profile = tokens[0]
-            source_chat_id = int(tokens[1])
-            bot = "@" + tokens[2].strip().lstrip("@")
+            def _is_int_token(s: str) -> bool:
+                try:
+                    int(str(s).strip())
+                    return True
+                except Exception:  # noqa: BLE001
+                    return False
 
+            async def _infer_default_relay_bot() -> str | None:
+                try:
+                    me = await self.client.get_me()
+                except Exception:  # noqa: BLE001
+                    me = None
+                username = getattr(me, "username", None) if me is not None else None
+                if username:
+                    return "@" + str(username).lstrip("@").strip()
+                return None
+
+            def _allocate_source_chat_id(sources: list[object]) -> int:
+                used: set[int] = set()
+                for s in sources:
+                    if not isinstance(s, dict):
+                        continue
+                    try:
+                        used.add(int(s.get("source_chat_id")))
+                    except Exception:  # noqa: BLE001
+                        continue
+                cand = -900000001
+                while cand in used:
+                    cand -= 1
+                return cand
+
+            def _dedupe_destinations(dests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                seen: set[tuple[int, int | None, str | None]] = set()
+                out: list[dict[str, Any]] = []
+                for d in dests or []:
+                    try:
+                        chat_id = int(d.get("chat_id"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    topic_id = int(d.get("topic_id")) if d.get("topic_id") is not None else None
+                    topic_title = str(d.get("topic_title")) if d.get("topic_title") else None
+                    key = (chat_id, topic_id, topic_title)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(d)
+                return out
+
+            profile = tokens[0]
+
+            positional: list[str] = []
             kv: dict[str, str] = {}
-            for t in tokens[3:]:
-                if "=" not in t:
-                    continue
-                k, v = t.split("=", 1)
-                kv[k.strip()] = v.strip()
+            for t in tokens[1:]:
+                if "=" in t:
+                    k, v = t.split("=", 1)
+                    kv[k.strip()] = v.strip()
+                else:
+                    positional.append(t)
+
+            cfg = self.config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            destinations: list[dict[str, Any]] = []
+            non_link_dest_tokens: list[str] = []
+
+            old_style = len(positional) >= 2 and _is_int_token(positional[0])
+            if old_style:
+                source_chat_id = int(positional[0])
+                bot = "@" + positional[1].strip().lstrip("@")
+                dest_tokens = positional[2:]
+
+                for t in dest_tokens:
+                    if looks_like_message_link(t):
+                        chat_id, _, topic_top = await self._resolve_message_link(t)
+                        dest: dict[str, Any] = {"chat_id": int(chat_id)}
+                        if topic_top is not None:
+                            dest["topic_id"] = int(topic_top)
+                        destinations.append(dest)
+                    else:
+                        non_link_dest_tokens.append(t)
+            else:
+                bot = kv.get("relay_bot") or kv.get("bot") or ""
+                if bot:
+                    bot = "@" + str(bot).strip().lstrip("@")
+                else:
+                    inferred = await _infer_default_relay_bot()
+                    if not inferred:
+                        await event.reply("🤖 错误: 无法推断 relay bot 用户名。请用旧用法，或在新用法里加 relay_bot=@YourRelayBot。")
+                        return
+                    bot = inferred
+
+                source_chat_id = int(kv.get("source_chat_id") or _allocate_source_chat_id(sources))
+
+                for t in positional:
+                    if looks_like_message_link(t):
+                        chat_id, _, topic_top = await self._resolve_message_link(t)
+                        dest: dict[str, Any] = {"chat_id": int(chat_id)}
+                        if topic_top is not None:
+                            dest["topic_id"] = int(topic_top)
+                        destinations.append(dest)
+                    else:
+                        non_link_dest_tokens.append(t)
+
+            if bot == "@":
+                await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
+                return
 
             poll_interval_sec = int(kv.get("poll_interval_sec") or kv.get("interval") or 300)
             fetch_limit = int(kv.get("fetch_limit") or kv.get("limit") or 30)
@@ -1257,9 +1355,8 @@ class RelayBot:
                 await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
                 return
 
-            cfg = self.config_manager.load(force=True)
-            tw = cfg.get("twitter_watch", {}) or {}
-            sources = list(tw.get("sources", []) or [])
+            destinations.extend(self._parse_destinations_tokens(non_link_dest_tokens))
+            destinations = _dedupe_destinations(destinations)
 
             new_entry: dict[str, Any] = {
                 "profile": str(profile),
@@ -1292,12 +1389,41 @@ class RelayBot:
             tw["enabled"] = True
             tw["sources"] = sources
             cfg["twitter_watch"] = tw
-            self.config_manager.save(cfg)
 
-            await event.reply(
-                "🤖 已添加 twitter_watch source（enabled=true）。\n"
-                "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。"
-            )
+            # Optional: auto-add a route when using dest links.
+            if destinations:
+                cfg.setdefault("relay", {})
+                routes = list((cfg.get("relay", {}) or {}).get("routes", []) or [])
+
+                merged = False
+                for r in routes:
+                    if not isinstance(r, dict):
+                        continue
+                    srcs = [int(x) for x in (r.get("source_chats") or []) if str(x).strip()]
+                    if srcs == [int(source_chat_id)] and not (r.get("source_topics") or []):
+                        r["destinations"] = _dedupe_destinations(list(r.get("destinations") or []) + destinations)
+                        merged = True
+                        break
+
+                if not merged:
+                    routes.append({"source_chats": [int(source_chat_id)], "destinations": destinations})
+
+                cfg["relay"]["routes"] = routes
+
+            self._save_config_and_reload(cfg)
+
+            if destinations:
+                await event.reply(
+                    "🤖 已添加 twitter_watch source，并已添加/更新 route。\n"
+                    f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot} | interval={new_entry['poll_interval_sec']}s | fetch_limit={new_entry['fetch_limit']}\n"
+                    f"destinations={self._format_destinations(destinations)}"
+                )
+            else:
+                await event.reply(
+                    "🤖 已添加 twitter_watch source。\n"
+                    "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。\n"
+                    f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot}"
+                )
             return
 
         if cmd == "/remove_x_watch":

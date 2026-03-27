@@ -1480,9 +1480,15 @@ async def _cmd_help(event):
             "    /list_topics @someforumgroup 100",
             "",
             "Twitter/X watch:",
-            "- /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]",
+            "- /add_x_watch (old) <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]",
             "  Example:",
-            "    /add_x_watch https://x.com/Mastertpe1125 -900000001 @YourRelayBot poll_interval_sec=300 fetch_limit=30 archive_file=state/mastertpe1125.txt",
+            "    /add_x_watch https://x.com/Mastertpe1125 -900000001 @YourRelayBot poll_interval_sec=3600 fetch_limit=30",
+            "- /add_x_watch (new) <x_profile_or_username> <dest_message_link> [dest_message_link...] [poll_interval_sec=...] [fetch_limit=...] [archive_file=...]",
+            "  Notes:",
+            "    - new form auto allocates source_chat_id and auto adds/updates a route.",
+            "    - relay_bot can be provided via relay_bot=@YourRelayBot; otherwise we try to infer it from bot_mappings.",
+            "  Example:",
+            "    /add_x_watch https://x.com/Mastertpe1125 https://t.me/coolgayvid/80369 poll_interval_sec=3600 fetch_limit=30",
             "- /list_x_watch",
             "- /remove_x_watch <index>",
             "",
@@ -1633,26 +1639,129 @@ async def main():
 
         elif cmd == "/add_x_watch":
             tokens = shlex.split(args or "")
-            if len(tokens) < 3:
+            if not tokens:
                 await event.reply(
-                    "🤖 用法: /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
-                    "提示: source_chat_id 可以是任意负数，用于 relay.routes 匹配。"
+                    "🤖 用法(旧): /add_x_watch <x_profile_or_username> <source_chat_id> <@relay_bot> [poll_interval_sec=300] [fetch_limit=30] [archive_file=state/... ]\n"
+                    "🤖 用法(新): /add_x_watch <x_profile_or_username> <dest_message_link> [dest_message_link...] [poll_interval_sec=...] [fetch_limit=...] [archive_file=...]\n"
+                    "提示: 新用法会自动生成 source_chat_id，并自动添加 route。"
                 )
                 return
 
+            def _is_int_token(s: str) -> bool:
+                try:
+                    int(str(s).strip())
+                    return True
+                except Exception:  # noqa: BLE001
+                    return False
+
+            def _infer_default_relay_bot(cfg: dict) -> str | None:
+                bots = {str(m.get("target_bot") or "").strip() for m in (cfg.get("bot_mappings") or []) if isinstance(m, dict)}
+                bots = {b for b in bots if b}
+                if len(bots) == 1:
+                    b = next(iter(bots))
+                    if not b.startswith("@"):  # pragma: no cover
+                        b = "@" + b
+                    return b
+                return None
+
+            def _allocate_source_chat_id(sources: list[object]) -> int:
+                used: set[int] = set()
+                for s in sources:
+                    if not isinstance(s, dict):
+                        continue
+                    try:
+                        used.add(int(s.get("source_chat_id")))
+                    except Exception:  # noqa: BLE001
+                        continue
+                # Pick a stable negative range.
+                cand = -900000001
+                while cand in used:
+                    cand -= 1
+                return cand
+
+            def _dedupe_destinations(dests: list[dict]) -> list[dict]:
+                seen: set[tuple[int, int | None, str | None]] = set()
+                out: list[dict] = []
+                for d in dests or []:
+                    try:
+                        chat_id = int(d.get("chat_id"))
+                    except Exception:  # noqa: BLE001
+                        continue
+                    topic_id = int(d.get("topic_id")) if d.get("topic_id") is not None else None
+                    topic_title = str(d.get("topic_title")) if d.get("topic_title") else None
+                    key = (chat_id, topic_id, topic_title)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(d)
+                return out
+
             profile = tokens[0]
-            source_chat_id = int(tokens[1])
-            bot = "@" + tokens[2].strip().lstrip("@")
+
+            positional: list[str] = []
+            kv: dict[str, str] = {}
+            for t in tokens[1:]:
+                if "=" in t:
+                    k, v = t.split("=", 1)
+                    kv[k.strip()] = v.strip()
+                else:
+                    positional.append(t)
+
+            old_style = False
+            if len(positional) >= 2 and _is_int_token(positional[0]):
+                # Old style: <profile> <source_chat_id> <@relay_bot> ...
+                old_style = True
+
+            cfg = config_manager.load(force=True)
+            tw = cfg.get("twitter_watch", {}) or {}
+            sources = list(tw.get("sources", []) or [])
+
+            destinations: list[dict] = []
+            non_link_dest_tokens: list[str] = []
+
+            if old_style:
+                source_chat_id = int(positional[0])
+                bot = "@" + positional[1].strip().lstrip("@")
+                dest_tokens = positional[2:]
+
+                for t in dest_tokens:
+                    if looks_like_message_link(t):
+                        chat_id, _, topic_top = await _resolve_message_link(t)
+                        dest: dict = {"chat_id": int(chat_id)}
+                        if topic_top is not None:
+                            dest["topic_id"] = int(topic_top)
+                        destinations.append(dest)
+                    else:
+                        non_link_dest_tokens.append(t)
+            else:
+                # New style: <profile> <dest_link...> [poll_interval_sec=...] ...
+                bot = kv.get("relay_bot") or kv.get("bot") or ""
+                if bot:
+                    bot = "@" + str(bot).strip().lstrip("@")
+                else:
+                    inferred = _infer_default_relay_bot(cfg)
+                    if not inferred:
+                        await event.reply(
+                            "🤖 错误: 无法推断 relay bot 用户名。请用旧用法，或在新用法里加 relay_bot=@YourRelayBot。"
+                        )
+                        return
+                    bot = inferred
+
+                source_chat_id = int(kv.get("source_chat_id") or _allocate_source_chat_id(sources))
+
+                for t in positional:
+                    if looks_like_message_link(t):
+                        chat_id, _, topic_top = await _resolve_message_link(t)
+                        dest: dict = {"chat_id": int(chat_id)}
+                        if topic_top is not None:
+                            dest["topic_id"] = int(topic_top)
+                        destinations.append(dest)
+                    else:
+                        non_link_dest_tokens.append(t)
+
             if bot == "@":
                 await event.reply("🤖 错误: 机器人用户名需以 @ 开头")
                 return
-
-            kv: dict[str, str] = {}
-            for t in tokens[3:]:
-                if "=" not in t:
-                    continue
-                k, v = t.split("=", 1)
-                kv[k.strip()] = v.strip()
 
             poll_interval_sec = int(kv.get("poll_interval_sec") or kv.get("interval") or 300)
             fetch_limit = int(kv.get("fetch_limit") or kv.get("limit") or 30)
@@ -1667,9 +1776,8 @@ async def main():
                 await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
                 return
 
-            cfg = config_manager.load(force=True)
-            tw = cfg.get("twitter_watch", {}) or {}
-            sources = list(tw.get("sources", []) or [])
+            destinations.extend(_parse_destinations(non_link_dest_tokens))
+            destinations = _dedupe_destinations(destinations)
 
             new_entry: dict = {
                 "profile": str(profile),
@@ -1702,12 +1810,41 @@ async def main():
             tw["enabled"] = True
             tw["sources"] = sources
             cfg["twitter_watch"] = tw
+
+            # Optional: auto-add a route when using dest links.
+            if destinations:
+                cfg.setdefault("relay", {})
+                routes = list((cfg.get("relay", {}) or {}).get("routes", []) or [])
+
+                merged = False
+                for r in routes:
+                    if not isinstance(r, dict):
+                        continue
+                    srcs = [int(x) for x in (r.get("source_chats") or []) if str(x).strip()]
+                    if srcs == [int(source_chat_id)] and not (r.get("source_topics") or []):
+                        r["destinations"] = _dedupe_destinations(list(r.get("destinations") or []) + destinations)
+                        merged = True
+                        break
+
+                if not merged:
+                    routes.append({"source_chats": [int(source_chat_id)], "destinations": destinations})
+
+                cfg["relay"]["routes"] = routes
+
             config_manager.save(cfg)
 
-            await event.reply(
-                "🤖 已添加 twitter_watch source（enabled=true）。\n"
-                "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。"
-            )
+            if destinations:
+                await event.reply(
+                    "🤖 已添加 twitter_watch source，并已添加/更新 route。\n"
+                    f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot} | interval={new_entry['poll_interval_sec']}s | fetch_limit={new_entry['fetch_limit']}\n"
+                    f"destinations={_format_destinations(destinations)}"
+                )
+            else:
+                await event.reply(
+                    "🤖 已添加 twitter_watch source。\n"
+                    "下一步: 用 /add_route <source_chat_id> <dest...> 把 source_chat_id 路由到目标话题/频道。\n"
+                    f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot}"
+                )
 
         elif cmd == "/remove_x_watch":
             tokens = shlex.split(args or "")
