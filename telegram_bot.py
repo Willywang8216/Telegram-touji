@@ -219,6 +219,13 @@ def _is_photo_message(msg) -> bool:
     return False
 
 
+def _is_location_message(msg) -> bool:
+    media = getattr(msg, "media", None)
+    if media is None:
+        return False
+    return isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue))
+
+
 def _is_disallowed_document(msg) -> bool:
     doc = getattr(msg, "document", None)
     if doc is None:
@@ -605,6 +612,7 @@ async def handler(event):
 
     is_gif_or_sticker = _is_gif_or_sticker(event.message)
     is_disallowed_doc = _is_disallowed_document(event.message)
+    is_location = _is_location_message(event.message)
     is_blocked = bool(filter_haystack and _is_blocked(filter_haystack))
     too_many_links = _has_too_many_links(msg_text)
     is_short_video = _is_short_video(event.message)
@@ -638,6 +646,16 @@ async def handler(event):
                 chat_id=str(event.chat_id),
                 message_id=getattr(event.message, "id", None),
                 duration=_video_duration_seconds(event.message),
+            )
+            return
+
+        if is_location:
+            log_event(
+                logger,
+                logging.INFO,
+                "message_skipped_location",
+                chat_id=str(event.chat_id),
+                message_id=getattr(event.message, "id", None),
             )
             return
 
@@ -708,8 +726,8 @@ async def handler(event):
             elif media_group_cache[key].get("source_topic_id") is None and source_topic_id is not None:
                 media_group_cache[key]["source_topic_id"] = source_topic_id
 
-            if is_gif_or_sticker or is_disallowed_doc or is_blocked or too_many_links:
-                media_group_cache[key]["blocked"] = True
+            if is_gif_or_sticker or is_disallowed_doc or is_location or is_blocked or too_many_links:
+ media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
             if media_group_cache[key]["task"]:
@@ -770,6 +788,16 @@ async def process_media_group(key: tuple[int, int]):
             logger,
             logging.INFO,
             "group_skipped_short_video",
+            chat_id=str(from_peer),
+            group_id=grouped_id,
+        )
+        return
+
+    if any(_is_location_message(m) for m in msgs):
+        log_event(
+            logger,
+            logging.INFO,
+            "group_skipped_location",
             chat_id=str(from_peer),
             group_id=grouped_id,
         )

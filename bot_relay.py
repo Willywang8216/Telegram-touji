@@ -744,6 +744,12 @@ class RelayBot:
 
         return False
 
+    def _is_location_message(self, msg) -> bool:
+        media = getattr(msg, "media", None)
+        if media is None:
+            return False
+        return isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue))
+
     def _is_video_message(self, msg) -> bool:
         return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
 
@@ -1637,6 +1643,16 @@ class RelayBot:
                 )
                 return
 
+            if any(self._is_location_message(m) for m in msgs):
+                log_event(
+                    self.logger,
+                    logging.INFO,
+                    "album_skipped_location",
+                    group_id=gid,
+                    source_chat_id=source_chat_id,
+                )
+                return
+
             if any(self._is_disallowed_document(m) for m in msgs):
                 log_event(
                     self.logger,
@@ -1701,15 +1717,22 @@ class RelayBot:
                 topic_title = dest.get("topic_title")
 
                 post_caption = self._post_caption_for(chat_id)
+
+                extra_text: str | None = None
                 full_caption = caption
                 if post_caption:
-                    full_caption = (full_caption or "") + ("\n\n" if full_caption else "") + post_caption
+                    if len(str(post_caption)) <= MEDIA_CAPTION_LIMIT:
+                        full_caption = str(post_caption)
+                    else:
+                        full_caption = None
+                        extra_text = str(post_caption)
 
                 if caption_for_blocking and self._is_blocked(caption_for_blocking):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, group_id=gid)
                     continue
 
-                if full_caption and self._is_blocked(full_caption):
+                # Don't apply blocklist to post_caption overrides; only the inbound content.
+                if not post_caption and full_caption and self._is_blocked(full_caption):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, group_id=gid)
                     continue
 
@@ -1755,6 +1778,16 @@ class RelayBot:
                         logger=self.logger,
                         action="send_album",
                     )
+
+                    if extra_text:
+                        await with_retry(
+                            lambda: self.client.send_message(chat_id, message=extra_text, reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_album_post_caption",
+                        )
+
                     log_event(
                         self.logger,
                         logging.INFO,
@@ -1809,6 +1842,16 @@ class RelayBot:
 
         media = getattr(msg, "media", None)
         uploadable_media = media is not None and not isinstance(media, types.MessageMediaWebPage)
+
+        if self._is_location_message(msg):
+            log_event(
+                self.logger,
+                logging.INFO,
+                "message_skipped_location",
+                message_id=msg.id,
+                source_chat_id=source_chat_id,
+            )
+            return
 
         if self._has_too_many_links(stripped_original_text):
             log_event(
@@ -1908,15 +1951,22 @@ class RelayBot:
                 topic_title = dest.get("topic_title")
 
                 post_caption = self._post_caption_for(chat_id)
+
+                extra_text: str | None = None
                 full_text = display_text
                 if post_caption:
-                    full_text = (full_text or "") + ("\n\n" if full_text else "") + post_caption
+                    if (uploadable_media or expanded is not None) and len(str(post_caption)) > MEDIA_CAPTION_LIMIT:
+                        full_text = ""
+                        extra_text = str(post_caption)
+                    else:
+                        full_text = str(post_caption)
 
                 # Block based on original inbound text even if strip_text is enabled.
                 if stripped_original_text and self._is_blocked(stripped_original_text):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
-                if full_text and self._is_blocked(full_text):
+                # Don't apply blocklist to post_caption overrides; only the inbound content.
+                if not post_caption and full_text and self._is_blocked(full_text):
                     log_event(self.logger, logging.INFO, "message_blocked", chat_id=chat_id, message_id=msg.id)
                     continue
 
@@ -1980,9 +2030,26 @@ class RelayBot:
                             logger=self.logger,
                             action="send_message",
                         )
+                    elif extra_text:
+                        await with_retry(
+                            lambda: self.client.send_message(chat_id, message=extra_text, reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_post_caption",
+                        )
                     else:
                         log_event(self.logger, logging.INFO, "message_skipped", chat_id=chat_id, message_id=msg.id)
                         continue
+
+                    if extra_text and (uploadable_media or expanded is not None):
+                        await with_retry(
+                            lambda: self.client.send_message(chat_id, message=extra_text, reply_to=reply_to),
+                            retries=3,
+                            base_delay=1,
+                            logger=self.logger,
+                            action="send_post_caption",
+                        )
 
                     log_event(
                         self.logger,

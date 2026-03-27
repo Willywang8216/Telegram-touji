@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from telethon import types, utils
 
-from bot_relay import ExpandedMedia, RelayBot
+from bot_relay import ExpandedMedia, MEDIA_CAPTION_LIMIT, RelayBot
 
 
 class FakeConfigManager:
@@ -125,6 +125,59 @@ class TestRelayBot(unittest.IsolatedAsyncioTestCase):
         await bot.handle(event)
 
         self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "cap", None)])
+
+    async def test_location_message_is_skipped(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        geo = types.GeoPoint(lat=1.0, long=2.0, access_hash=0)
+        msg = FakeMessage(message_id=10, media=types.MessageMediaGeo(geo=geo), raw_text="here")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [])
+
+    async def test_post_caption_overrides_original_text(self):
+        client = FakeClient()
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0, "post_captions": {-100: "MYCAP"}},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", video="VIDEO")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(client.calls, [("send_file", -100, "MEDIA", "MYCAP", None)])
+
+    async def test_long_post_caption_is_sent_as_separate_message(self):
+        client = FakeClient()
+        long_cap = "X" * (MEDIA_CAPTION_LIMIT + 10)
+        bot = RelayBot(
+            client,
+            FakeConfigManager(),
+            {"dest_channels": [-100], "master_account_id": 0, "post_captions": {-100: long_cap}},
+            rate_limiter=FakeRateLimiter(),
+        )
+
+        msg = FakeMessage(message_id=10, media="MEDIA", raw_text="cap", video="VIDEO")
+        event = FakeEvent(chat_id=1, sender_id=2, raw_text=msg.raw_text, message=msg)
+        await bot.handle(event)
+
+        self.assertEqual(
+            client.calls,
+            [
+                ("send_file", -100, "MEDIA", None, None),
+                ("send_message", -100, long_cap, None),
+            ],
+        )
 
     async def test_short_video_is_skipped(self):
         client = FakeClient()
