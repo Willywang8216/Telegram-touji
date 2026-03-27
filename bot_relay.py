@@ -946,6 +946,64 @@ class RelayBot:
         self.settings = load_relay_settings(self.config_manager)
         self._maybe_log_topic_config_warning(self.settings)
 
+    async def _normalize_routes_filter_args(self, event, args: str) -> str | None:
+        tokens = shlex.split(args or "")
+        if not tokens:
+            return (args or "").strip()
+
+        dest_ids: list[int] = []
+        topic_top: int | None = None
+        topic_title: str | None = None
+        keep: list[str] = []
+
+        for tok in tokens:
+            if looks_like_message_link(tok):
+                try:
+                    chat_id, _, top = await self._resolve_message_link(tok)
+                except Exception as exc:  # noqa: BLE001
+                    await event.reply(f"🤖 错误: 无法解析链接: {tok} ({type(exc).__name__})")
+                    return None
+
+                dest_ids.append(int(chat_id))
+
+                if top is not None and topic_top is None:
+                    topic_top = int(top)
+
+                    if topic_top == 1:
+                        topic_title = "General"
+                    else:
+                        try:
+                            ent = await self.client.get_entity(int(chat_id))
+                            msg = await self.client.get_messages(ent, ids=int(topic_top))
+                            action = getattr(msg, "action", None) if msg else None
+                            title = getattr(action, "title", None) if action else None
+                            if title:
+                                topic_title = str(title)
+                        except Exception:  # noqa: BLE001
+                            topic_title = None
+
+                continue
+
+            keep.append(tok)
+
+        if dest_ids:
+            seen: set[int] = set()
+            uniq: list[int] = []
+            for d in dest_ids:
+                if d in seen:
+                    continue
+                seen.add(d)
+                uniq.append(d)
+            keep.append("dest=" + ",".join(str(x) for x in uniq))
+
+        # Prefer filtering by resolved topic title (works for both topic_id and topic_title routes).
+        if topic_title:
+            keep.append("topic=" + shlex.quote(topic_title))
+        elif topic_top is not None:
+            keep.append(f"topic_id={int(topic_top)}")
+
+        return " ".join([x for x in keep if str(x).strip()]).strip()
+
     def _menu_buttons(self, menu: str) -> list[list[Any]]:
         menu = (menu or "main").strip().lower()
 
@@ -1724,9 +1782,16 @@ class RelayBot:
                 await event.reply("🤖 routes 为空")
                 return
 
-            text = await self._build_routes_report(list(routes), args)
+            args2 = await self._normalize_routes_filter_args(event, args)
+            if args2 is None:
+                return
+
+            text = await self._build_routes_report(list(routes), args2)
             if not text:
-                await event.reply("🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]")
+                await event.reply(
+                    "🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]\n"
+                    "提示: 也可以直接传一个 Telegram 消息链接（t.me/...）来按 destination/topic 过滤。"
+                )
                 return
 
             if len(text) <= 3500:
@@ -1751,7 +1816,11 @@ class RelayBot:
                 await event.reply("🤖 routes 为空")
                 return
 
-            text = await self._build_routes_report(list(routes), args)
+            args2 = await self._normalize_routes_filter_args(event, args)
+            if args2 is None:
+                return
+
+            text = await self._build_routes_report(list(routes), args2)
             if not text:
                 await event.reply("🤖 未匹配到 routes。")
                 return
@@ -2010,6 +2079,25 @@ class RelayBot:
         if sender_id in self._menu_state:
             await self._handle_menu_input(event, stripped_text)
             return
+
+        # Convenience: allow commands without a leading "/".
+        if stripped_text:
+            head = str(stripped_text.split(" ", 1)[0] or "").casefold().strip()
+            if head in {
+                "help",
+                "start",
+                "menu",
+                "list_routes",
+                "export_routes",
+                "add_route",
+                "remove_route",
+                "set_destinations",
+                "list_x_watch",
+                "add_x_watch",
+                "remove_x_watch",
+            }:
+                await self._handle_command(event, "/" + stripped_text)
+                return
 
         msg = event.message
         if msg.grouped_id:

@@ -1155,6 +1155,65 @@ async def _build_routes_report(routes: list[dict], args: str) -> str | None:
     return "\n".join(out)
 
 
+async def _normalize_routes_filter_args(event, args: str) -> str | None:
+    tokens = shlex.split(args or "")
+    if not tokens:
+        return (args or "").strip()
+
+    dest_ids: list[int] = []
+    topic_top: int | None = None
+    topic_title: str | None = None
+    keep: list[str] = []
+
+    for tok in tokens:
+        if looks_like_message_link(tok):
+            try:
+                chat_id, _, top = await _resolve_message_link(tok)
+            except Exception as exc:  # noqa: BLE001
+                await event.reply(f"🤖 错误: 无法解析链接: {tok} ({type(exc).__name__})")
+                return None
+
+            dest_ids.append(int(chat_id))
+
+            if top is not None and topic_top is None:
+                topic_top = int(top)
+
+                if topic_top == 1:
+                    topic_title = "General"
+                else:
+                    try:
+                        ent = await client.get_entity(int(chat_id))
+                        msg = await client.get_messages(ent, ids=int(topic_top))
+                        action = getattr(msg, "action", None) if msg else None
+                        title = getattr(action, "title", None) if action else None
+                        if title:
+                            topic_title = str(title)
+                    except Exception:  # noqa: BLE001
+                        topic_title = None
+
+            continue
+
+        keep.append(tok)
+
+    if dest_ids:
+        seen: set[int] = set()
+        uniq: list[int] = []
+        for d in dest_ids:
+            if d in seen:
+                continue
+            seen.add(d)
+            uniq.append(d)
+        keep.append("dest=" + ",".join(str(x) for x in uniq))
+
+    # Prefer filtering by resolved topic title (works for both topic_id and topic_title routes).
+    if topic_title:
+        keep.append("topic=" + shlex.quote(topic_title))
+    elif topic_top is not None:
+        keep.append(f"topic_id={int(topic_top)}")
+
+    return " ".join([x for x in keep if str(x).strip()]).strip()
+
+
 async def _cmd_list_routes(event, args: str = ""):
     cfg = config_manager.load(force=True)
     relay = cfg.get("relay", {}) or {}
@@ -1163,9 +1222,16 @@ async def _cmd_list_routes(event, args: str = ""):
         await event.reply("🤖 routes 为空")
         return
 
-    text = await _build_routes_report(list(routes), args)
+    args2 = await _normalize_routes_filter_args(event, args)
+    if args2 is None:
+        return
+
+    text = await _build_routes_report(list(routes), args2)
     if not text:
-        await event.reply("🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]")
+        await event.reply(
+            "🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]\n"
+            "提示: 也可以直接传一个 Telegram 消息链接（t.me/...）来按 destination/topic 过滤。"
+        )
         return
 
     if len(text) <= 3500:
@@ -1190,7 +1256,11 @@ async def _cmd_export_routes(event, args: str = ""):
         await event.reply("🤖 routes 为空")
         return
 
-    text = await _build_routes_report(list(routes), args)
+    args2 = await _normalize_routes_filter_args(event, args)
+    if args2 is None:
+        return
+
+    text = await _build_routes_report(list(routes), args2)
     if not text:
         await event.reply("🤖 未匹配到 routes。")
         return
@@ -1521,13 +1591,32 @@ async def main():
 
     @client.on(NewMessage(func=lambda e: e.is_private and e.sender_id == settings["master_account_id"]))
     async def command_handler(event):
-        cmd, args = parse_command(event.message.text)
+        raw = str(getattr(event.message, "text", "") or "")
+        cmd, args = parse_command(raw)
         if not cmd:
-            return
-
-        if cmd in {"/help", "/start"}:
-            await _cmd_help(event)
-            return
+            t = raw.strip()
+            head = str(t.split(" ", 1)[0] or "").casefold().strip()
+            if head in {
+                "help",
+                "start",
+                "join",
+                "leave",
+                "add_listen",
+                "remove_listen",
+                "list_listen",
+                "list_routes",
+                "export_routes",
+                "add_route",
+                "remove_route",
+                "set_destinations",
+                "list_topics",
+                "add_x_watch",
+                "list_x_watch",
+                "remove_x_watch",
+            }:
+                cmd, args = parse_command("/" + t)
+            else:
+                return
 
         if cmd == "/join":
             try:
