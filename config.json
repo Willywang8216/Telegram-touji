@@ -400,7 +400,58 @@
   "twitter_watch": {
     "enabled": true,
     "cookies_file": "twitter.cookies.txt",
-    "sources": []
+    "sources": [
+      {
+        "profile": "https://x.com/CoupleExtream",
+        "target_bot": "@sexualwillgaypornbot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "dest_links": [
+          "https://t.me/coolgayvid/80376",
+          "https://t.me/coolhotgayporn/77679"
+        ]
+      },
+      {
+        "profile": "https://x.com/Dylan_Sins",
+        "target_bot": "@sexualwillgaypornbot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "dest_links": [
+          "https://t.me/coolgayvid/80376",
+          "https://t.me/coolhotgayporn/77679"
+        ]
+      },
+      {
+        "profile": "https://x.com/TheDeviant21",
+        "target_bot": "@sexualwillgaypornbot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "dest_links": [
+          "https://t.me/coolgayvid/80376",
+          "https://t.me/coolhotgayporn/77679"
+        ]
+      },
+      {
+        "profile": "https://x.com/publicexb",
+        "target_bot": "@sexualwillgaypornbot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "dest_links": [
+          "https://t.me/coolgayvid/80376",
+          "https://t.me/coolhotgayporn/77679"
+        ]
+      },
+      {
+        "profile": "https://x.com/exhib_extream",
+        "target_bot": "@sexualwillgaypornbot",
+        "poll_interval_sec": 300,
+        "fetch_limit": 30,
+        "dest_links": [
+          "https://t.me/coolgayvid/80376",
+          "https://t.me/coolhotgayporn/77679"
+        ]
+      }
+    ]
   },
   "proxy": null
 }

@@ -416,6 +416,119 @@ async def _poll_twitter_watch_source(src: dict, *, cookies_file: str | None, bot
     )
 
 
+async def _ensure_twitter_watch_routes(cfg: dict, sources: list[object]) -> bool:
+    """Resolve dest message links in twitter_watch sources into relay routes.
+
+    This enables config-driven setup:
+      {"profile": "...", "target_bot": "@Bot", "dest_links": ["https://t.me/...", ...]}
+
+    On first run we allocate a source_chat_id (if missing), resolve the message links
+    to (chat_id, topic_id), and persist the resulting routes back to config.json.
+    """
+
+    if not sources:
+        return False
+
+    relay = cfg.get("relay", {}) or {}
+    routes = list(relay.get("routes", []) or [])
+
+    def _allocate_source_chat_id() -> int:
+        used: set[int] = set()
+        for s in sources:
+            if not isinstance(s, dict):
+                continue
+            try:
+                used.add(int(s.get("source_chat_id")))
+            except Exception:  # noqa: BLE001
+                continue
+        cand = -900000001
+        while cand in used:
+            cand -= 1
+        return cand
+
+    def _dedupe_destinations(dests: list[dict]) -> list[dict]:
+        seen: set[tuple[int, int | None, str | None]] = set()
+        out: list[dict] = []
+        for d in dests or []:
+            try:
+                chat_id = int(d.get("chat_id"))
+            except Exception:  # noqa: BLE001
+                continue
+            topic_id = int(d.get("topic_id")) if d.get("topic_id") is not None else None
+            topic_title = str(d.get("topic_title")) if d.get("topic_title") else None
+            key = (chat_id, topic_id, topic_title)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+        return out
+
+    changed = False
+
+    for s in sources:
+        if not isinstance(s, dict):
+            continue
+
+        dest_links = s.get("dest_links") or s.get("dest_message_links") or s.get("destinations_links")
+        if not dest_links:
+            continue
+
+        if isinstance(dest_links, str):
+            dest_links = [dest_links]
+        if not isinstance(dest_links, list):
+            continue
+
+        try:
+            source_chat_id = int(s.get("source_chat_id"))
+        except Exception:  # noqa: BLE001
+            source_chat_id = _allocate_source_chat_id()
+            s["source_chat_id"] = int(source_chat_id)
+            changed = True
+
+        destinations: list[dict] = []
+        for link in [str(x).strip() for x in dest_links if str(x).strip()]:
+            if not looks_like_message_link(link):
+                continue
+            try:
+                chat_id, _, topic_top = await _resolve_message_link(link)
+            except Exception:  # noqa: BLE001
+                continue
+            d: dict = {"chat_id": int(chat_id)}
+            if topic_top is not None:
+                d["topic_id"] = int(topic_top)
+            destinations.append(d)
+
+        destinations = _dedupe_destinations(destinations)
+        if not destinations:
+            continue
+
+        merged = False
+        for r in routes:
+            if not isinstance(r, dict):
+                continue
+            srcs = [int(x) for x in (r.get("source_chats") or []) if str(x).strip()]
+            if srcs == [int(source_chat_id)] and not (r.get("source_topics") or []):
+                r["destinations"] = _dedupe_destinations(list(r.get("destinations") or []) + destinations)
+                merged = True
+                break
+
+        if not merged:
+            routes.append({"source_chats": [int(source_chat_id)], "destinations": destinations})
+
+        # Mark as resolved to avoid repeated work, but keep the original list for reference.
+        if not s.get("dest_links_resolved"):
+            s["dest_links_resolved"] = True
+            changed = True
+
+    if changed:
+        cfg.setdefault("relay", {})
+        cfg["relay"]["routes"] = routes
+        cfg.setdefault("twitter_watch", {})
+        cfg["twitter_watch"]["sources"] = sources
+
+    return changed
+
+
 async def twitter_watch_loop() -> None:
     next_run: dict[str, float] = {}
     bot_cache: dict[str, object] = {}
@@ -432,6 +545,14 @@ async def twitter_watch_loop() -> None:
             if not sources:
                 await asyncio.sleep(10)
                 continue
+
+            # Config-driven convenience: resolve dest_links into relay routes once.
+            try:
+                if await _ensure_twitter_watch_routes(cfg, list(sources)):
+                    config_manager.save(cfg)
+                    log_event(logger, logging.INFO, "twitter_watch_routes_resolved")
+            except Exception as exc:  # noqa: BLE001
+                log_event(logger, logging.ERROR, "twitter_watch_routes_resolve_failed", error=f"{type(exc).__name__}: {exc}")
 
             cookies_file = watch.get("cookies_file")
             if not cookies_file:
