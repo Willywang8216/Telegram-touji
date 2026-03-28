@@ -436,6 +436,8 @@ async def twitter_watch_loop() -> None:
             cookies_file = watch.get("cookies_file")
             if not cookies_file:
                 cookies_file = (cfg.get("relay", {}) or {}).get("twitter_cookies_file")
+            if not cookies_file and Path("twitter.cookies.txt").exists():
+                cookies_file = "twitter.cookies.txt"
 
             now = time.monotonic()
             for src in sources:

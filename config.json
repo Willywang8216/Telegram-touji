@@ -225,6 +225,8 @@
     "api_hash": "",
     "bot_token": "",
 
+    "twitter_cookies_file": "twitter.cookies.txt",
+
     "master_account_id": 5505419525,
 
     "strip_text": true,
@@ -394,6 +396,11 @@
       "预览",
       "預覽"
     ]
+  },
+  "twitter_watch": {
+    "enabled": true,
+    "cookies_file": "twitter.cookies.txt",
+    "sources": []
   },
   "proxy": null
 }

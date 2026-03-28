@@ -133,6 +133,9 @@
     "api_id": 26141001,
     "api_hash": "",
     "bot_token": "",
+
+    "twitter_cookies_file": "twitter.cookies.txt",
+
     "master_account_id": 5505419525,
 
     "strip_text": true,
@@ -300,6 +303,11 @@
       "备用群https://t.me/",
       "自用 VPN 仅需"
     ]
+  },
+  "twitter_watch": {
+    "enabled": true,
+    "cookies_file": "twitter.cookies.txt",
+    "sources": []
   },
   "proxy": null
 }

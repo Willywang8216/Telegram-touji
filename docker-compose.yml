@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./:/app
-    command: python telegram_bot.py
+    command: sh scripts/run_userbot.sh
     environment:
       - TZ=Asia/Shanghai
     env_file:
@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./:/app
-    command: python bot_relay.py
+    command: sh scripts/run_relaybot.sh
     environment:
       - TZ=Asia/Shanghai
     env_file:
