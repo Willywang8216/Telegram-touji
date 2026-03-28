@@ -1,6 +1,6 @@
 import unittest
 
-from twitter_watch import normalize_twitter_profile_url, tweet_id_from_url, _extract_tweet_entries
+from twitter_watch import normalize_twitter_profile_url, tweet_id_from_url, _extract_tweet_entries, candidate_profile_urls
 
 
 class TestTwitterWatchHelpers(unittest.TestCase):
@@ -15,6 +15,13 @@ class TestTwitterWatchHelpers(unittest.TestCase):
             normalize_twitter_profile_url("https://x.com/Mastertpe1125/media"),
             "https://x.com/Mastertpe1125/media",
         )
+
+    def test_candidate_profile_urls(self):
+        urls = candidate_profile_urls("https://x.com/SomeUser", media_only=True)
+        self.assertIn("https://x.com/SomeUser/media", urls)
+        self.assertIn("https://twitter.com/SomeUser/media", urls)
+        self.assertIn("https://x.com/SomeUser", urls)
+        self.assertIn("https://twitter.com/SomeUser", urls)
 
     def test_tweet_id_from_url(self):
         self.assertEqual(tweet_id_from_url("https://x.com/a/status/123"), "123")

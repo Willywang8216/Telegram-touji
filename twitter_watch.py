@@ -6,6 +6,7 @@ from twitter_expand import extract_tweet_urls
 
 
 _TWEET_ID_RE = re.compile(r"/status/(\d+)")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def tweet_id_from_url(url: str) -> str | None:
@@ -70,6 +71,60 @@ def _extract_tweet_entries(info: dict[str, Any]) -> list[dict[str, str]]:
     return out
 
 
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", str(s or ""))
+
+
+def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str]:
+    """Build a list of profile URLs to try with yt-dlp.
+
+    yt-dlp support varies by version (x.com vs twitter.com; /media vs base timeline).
+    We try a small set of common variants.
+    """
+
+    base = normalize_twitter_profile_url(profile, media_only=False)
+    base = base.rstrip("/")
+    if base.endswith("/media"):
+        base = base[: -len("/media")]
+
+    bases: list[str] = []
+
+    # Most of the time normalize_twitter_profile_url returns https://x.com/<handle>...
+    if base.startswith("https://x.com/"):
+        tail = base[len("https://x.com/") :]
+        handle = (tail.split("/", 1)[0] if tail else "").strip()
+        if handle and handle not in {"i", "home", "search", "intent"}:
+            bases = [f"https://x.com/{handle}", f"https://twitter.com/{handle}"]
+
+    if not bases:
+        bases = [
+            base,
+            base.replace("https://x.com/", "https://twitter.com/"),
+            base.replace("https://twitter.com/", "https://x.com/"),
+        ]
+
+    out: list[str] = []
+    for b in bases:
+        b = str(b or "").rstrip("/")
+        if not b:
+            continue
+
+        if media_only:
+            out.append(b + "/media")
+        out.append(b)
+
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for u in out:
+        if u in seen:
+            continue
+        seen.add(u)
+        uniq.append(u)
+
+    return uniq
+
+
 def list_profile_tweets(
     profile: str,
     *,
@@ -88,7 +143,6 @@ def list_profile_tweets(
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError("yt-dlp is required to list tweets") from exc
 
-    url = normalize_twitter_profile_url(profile, media_only=True)
     limit = max(1, int(limit or 1))
 
     ydl_opts: dict[str, Any] = {
@@ -103,13 +157,28 @@ def list_profile_tweets(
     if cookies_file:
         ydl_opts["cookiefile"] = str(cookies_file)
 
-    with YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
+    last_exc: Exception | None = None
 
-    if not isinstance(info, dict):
-        return []
+    candidates = candidate_profile_urls(profile, media_only=True)
+    for url in candidates:
+        try:
+            with YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
 
-    return _extract_tweet_entries(info)
+            if not isinstance(info, dict):
+                continue
+
+            return _extract_tweet_entries(info)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            continue
+
+    if last_exc is not None:
+        msg = _strip_ansi(str(last_exc))
+        tried = ", ".join(candidates)
+        raise RuntimeError(f"Failed to list tweets for {profile}. Last error: {msg}. Tried: {tried}") from last_exc
+
+    return []
 
 
 def ensure_parent_dir(path: str | Path) -> None:
