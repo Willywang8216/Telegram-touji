@@ -80,8 +80,11 @@ def download_tweet_media(
 
     if logger is not None:
         # Provide minimal visibility without depending on structured logging.
-        def _log(msg: str) -> None:
+        # yt-dlp expects logger methods with signature (self, msg, *args).
+        def _log(self, msg: str, *args) -> None:  # noqa: ANN001
             try:
+                if args:
+                    msg = str(msg) % args
                 logger.info(msg)
             except Exception:  # noqa: BLE001
                 return

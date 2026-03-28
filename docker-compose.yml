@@ -1,4 +1,3 @@
-version: '3'
 services:
   # 服务1: 用户机器人 (负责从源频道偷消息 -> 发给机器人)
   userbot:
