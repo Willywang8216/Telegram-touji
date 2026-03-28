@@ -1,6 +1,14 @@
+import tempfile
 import unittest
 
-from twitter_watch import normalize_twitter_profile_url, tweet_id_from_url, _extract_tweet_entries, candidate_profile_urls
+from twitter_watch import (
+    _cookies_header_from_netscape_file,
+    _extract_tweet_entries,
+    _extract_tweet_urls_from_html,
+    candidate_profile_urls,
+    normalize_twitter_profile_url,
+    tweet_id_from_url,
+)
 
 
 class TestTwitterWatchHelpers(unittest.TestCase):
@@ -47,6 +55,29 @@ class TestTwitterWatchHelpers(unittest.TestCase):
         self.assertEqual(out[0]["text"], "hello")
         self.assertEqual(out[1]["url"], "https://x.com/jack/status/12345")
         self.assertEqual(out[1]["text"], "hi")
+
+    def test_cookies_header_from_netscape(self):
+        content = """# Netscape HTTP Cookie File
+.twitter.com\tTRUE\t/\tTRUE\t0\tauth_token\tAAA
+.twitter.com\tTRUE\t/\tFALSE\t0\tct0\tBBB
+"""
+        with tempfile.NamedTemporaryFile("w", delete=True) as f:
+            f.write(content)
+            f.flush()
+            header = _cookies_header_from_netscape_file(f.name)
+
+        self.assertIsNotNone(header)
+        assert header is not None
+        self.assertIn("auth_token=AAA", header)
+        self.assertIn("ct0=BBB", header)
+
+    def test_extract_urls_from_html_includes_relative(self):
+        html = """<html><body>
+<a href=\"/jack/status/20\">t</a>
+<a href=\"https://x.com/jack/status/21?s=1\">t</a>
+</body></html>"""
+        urls = _extract_tweet_urls_from_html(html, base_url="https://x.com/jack/media")
+        self.assertEqual(urls, ["https://x.com/jack/status/20", "https://x.com/jack/status/21"])
 
 
 if __name__ == "__main__":

@@ -1,4 +1,7 @@
 import re
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -72,15 +75,12 @@ def _extract_tweet_entries(info: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub("", str(s or ""))
+    return _ANSI_RE.sub</old_code><new_code>def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str]:
+    """Build a list of profile URLs to try.
 
-
-def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str]:
-    """Build a list of profile URLs to try with yt-dlp.
-
-    yt-dlp support varies by version (x.com vs twitter.com; /media vs base timeline).
-    We try a small set of common variants.
-    """
+    Downstream scraping support varies by runtime (x.com vs twitter.com; /media vs base timeline),
+    so we try a small set of common variants.
+    ""
 
     base = normalize_twitter_profile_url(profile, media_only=False)
     base = base.rstrip("/")
@@ -125,6 +125,106 @@ def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str
     return uniq
 
 
+def _cookies_header_from_netscape_file(path: str) -> str | None:
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return None
+
+    cookies: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip("\n")
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 7:
+            continue
+        name = (parts[5] or "").strip()
+        value = (parts[6] or "").strip()
+        if not name:
+            continue
+        cookies[name] = value
+
+    if not cookies:
+        return None
+
+    return "; ".join([f"{k}={v}" for k, v in cookies.items()])
+
+
+_REL_TWEET_HREF_RE = re.compile(r"href=\"(?P<href>/[^\"<>\s]*/status/\d+[^\"<>\s]*)\"")
+
+
+def _extract_tweet_urls_from_html(html: str, *, base_url: str) -> list[str]:
+    # 1) Full URLs already in the document.
+    out = extract_tweet_urls(html)
+
+    # 2) Relative hrefs.
+    u = urllib.parse.urlparse(base_url)
+    prefix = f"{u.scheme}://{u.netloc}"
+
+    for m in _REL_TWEET_HREF_RE.finditer(html or ""):
+        href = m.group("href")
+        if not href:
+            continue
+        out.extend(extract_tweet_urls(prefix + href))
+
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for x in out:
+        if x in seen:
+            continue
+        seen.add(x)
+        uniq.append(x)
+
+    return uniq
+
+
+def _list_profile_tweets_via_html(
+    profile_url: str,
+    *,
+    cookies_file: str | None,
+    limit: int,
+) -> list[dict[str, str]]:
+    cookie_header = _cookies_header_from_netscape_file(str(cookies_file)) if cookies_file else None
+    if not cookie_header:
+        raise RuntimeError("empty_cookies")
+
+    req = urllib.request.Request(
+        profile_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cookie": cookie_header,
+        },
+        method="GET",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            body = resp.read()
+            final_url = getattr(resp, "url", None) or profile_url
+    except urllib.error.HTTPError as exc:  # pragma: no cover
+        raise RuntimeError(f"HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:  # pragma: no cover
+        raise RuntimeError("url_error") from exc
+
+    html = body.decode("utf-8", errors="ignore")
+
+    # Common unauthenticated redirect pages contain this path.
+    if "/i/flow/login" in html or "/login" in str(final_url):
+        raise RuntimeError("not_authenticated")
+
+    urls = _extract_tweet_urls_from_html(html, base_url=str(final_url))
+    if not urls:
+        raise RuntimeError("no_tweet_urls_found")
+
+    urls = urls[: max(1, int(limit or 1))]
+
+    return [{"url": u, "text": ""} for u in urls]
+
+
 def list_profile_tweets(
     profile: str,
     *,
@@ -135,15 +235,41 @@ def list_profile_tweets(
 
     Returns a list of {url, text} where url is a normalized tweet URL.
 
-    Uses yt-dlp's twitter extractor. This is best-effort: X frequently changes.
+    Notes:
+    - yt-dlp generally supports tweet URLs, but many versions do *not* support profile URLs.
+    - We therefore try a lightweight HTML scrape first when cookies are available, and only
+      fall back to yt-dlp when we have no cookies.
     """
 
+    limit = max(1, int(limit or 1))
+
+    candidates = candidate_profile_urls(profile, media_only=True)
+
+    # Preferred path: HTML scrape using auth cookies.
+    if cookies_file and Path(str(cookies_file)).exists():
+        last_exc: Exception | None = None
+        for url in candidates:
+            try:
+                res = _list_profile_tweets_via_html(url, cookies_file=cookies_file, limit=limit)
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                continue
+            if res:
+                return res
+
+        # If all attempts errored, surface a useful error.
+        if last_exc is not None:
+            tried = ", ".join(candidates)
+            raise RuntimeError(f"Failed to list tweets for {profile}. Last error: {last_exc}. Tried: {tried}") from last_exc
+
+        # No errors, just no tweets.
+        return []
+
+    # Fallback: yt-dlp (only when no cookies are provided).
     try:
         from yt_dlp import YoutubeDL  # type: ignore
     except ModuleNotFoundError as exc:  # pragma: no cover
         raise RuntimeError("yt-dlp is required to list tweets") from exc
-
-    limit = max(1, int(limit or 1))
 
     ydl_opts: dict[str, Any] = {
         "quiet": True,
@@ -154,12 +280,8 @@ def list_profile_tweets(
         "nocheckcertificate": True,
         "retries": 3,
     }
-    if cookies_file:
-        ydl_opts["cookiefile"] = str(cookies_file)
 
-    last_exc: Exception | None = None
-
-    candidates = candidate_profile_urls(profile, media_only=True)
+    last_exc = None
     for url in candidates:
         try:
             with YoutubeDL(ydl_opts) as ydl:
