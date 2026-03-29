@@ -13,6 +13,7 @@ class TestSyntax(unittest.TestCase):
             Path("telegram_link_utils.py"),
             Path("delivery.py"),
             Path("structured_logger.py"),
+            Path("twitter_expand.py"),
             Path("twitter_expansion.py"),
             Path("twitter_watch.py"),
             Path("route_filter_utils.py"),

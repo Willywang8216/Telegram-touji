@@ -1,4 +1,6 @@
+import os
 import re
+import tempfile
 from pathlib import Path
 
 
@@ -43,6 +45,78 @@ def extract_tweet_urls(text: str) -> list[str]:
     return out
 
 
+def _sanitize_netscape_cookies_text(text: str) -> str | None:
+    """Best-effort sanitize a cookies.txt into Netscape format.
+
+    yt-dlp is strict about cookiefile parsing and can error out if any line is malformed.
+    """
+
+    if not text:
+        return None
+
+    out_lines: list[str] = []
+    saw_header = False
+
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip("\r\n")
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            if "Netscape HTTP Cookie File" in line:
+                saw_header = True
+            out_lines.append(line)
+            continue
+
+        parts = line.split("\t")
+        if len(parts) < 7:
+            parts = re.split(r"\s+", line)
+
+        if len(parts) < 7:
+            continue
+
+        out_lines.append("\t".join(parts[:7]))
+
+    if not out_lines:
+        return None
+
+    if not saw_header:
+        out_lines.insert(0, "# Netscape HTTP Cookie File")
+
+    return "\n".join(out_lines) + "\n"
+
+
+def _prepare_cookiefile(cookies_file: str, *, logger=None) -> str | None:
+    p = Path(str(cookies_file))
+    if not p.exists():
+        return None
+
+    try:
+        raw = p.read_text(encoding="utf-8", errors="ignore")
+    except Exception:  # noqa: BLE001
+        return None
+
+    sanitized = _sanitize_netscape_cookies_text(raw)
+    if not sanitized:
+        return None
+
+    tmp = tempfile.NamedTemporaryFile("w", delete=False, prefix="twitter_cookies_", suffix=".txt")
+    try:
+        tmp.write(sanitized)
+        tmp.close()
+        return tmp.name
+    except Exception:  # noqa: BLE001
+        try:
+            tmp.close()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            os.unlink(tmp.name)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+
 def download_tweet_media(
     url: str,
     output_dir: str | Path,
@@ -67,6 +141,10 @@ def download_tweet_media(
 
     before = {p.name for p in out_dir.iterdir()} if out_dir.exists() else set()
 
+    prepared_cookiefile: str | None = None
+    if cookies_file:
+        prepared_cookiefile = _prepare_cookiefile(str(cookies_file), logger=logger)
+
     ydl_opts: dict = {
         "quiet": True,
         "noprogress": True,
@@ -75,8 +153,10 @@ def download_tweet_media(
         "ignoreerrors": False,
         "retries": 3,
     }
-    if cookies_file:
-        ydl_opts["cookiefile"] = str(cookies_file)
+    if prepared_cookiefile:
+        ydl_opts["cookiefile"] = str(prepared_cookiefile)
+    elif cookies_file and logger is not None:
+        logger.info("[twitter] cookies_file_invalid_or_unreadable: %s", str(cookies_file))
 
     if logger is not None:
         # Provide minimal visibility without depending on structured logging.
@@ -91,8 +171,15 @@ def download_tweet_media(
 
         ydl_opts["logger"] = type("_YdlLogger", (), {"debug": _log, "warning": _log, "error": _log})()
 
-    with YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
+    try:
+        with YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    finally:
+        if prepared_cookiefile:
+            try:
+                os.unlink(prepared_cookiefile)
+            except Exception:  # noqa: BLE001
+                pass
 
     after = [p for p in out_dir.iterdir() if p.is_file() and p.name not in before]
     after.sort(key=lambda p: (p.stat().st_mtime, p.name))
