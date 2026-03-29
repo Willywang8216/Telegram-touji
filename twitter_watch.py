@@ -75,12 +75,15 @@ def _extract_tweet_entries(info: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _strip_ansi(s: str) -> str:
-    return _ANSI_RE.sub</old_code><new_code>def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str]:
+    return _ANSI_RE.sub("", str(s or ""))
+
+
+def candidate_profile_urls(profile: str, *, media_only: bool = True) -> list[str]:
     """Build a list of profile URLs to try.
 
     Downstream scraping support varies by runtime (x.com vs twitter.com; /media vs base timeline),
     so we try a small set of common variants.
-    ""
+    """
 
     base = normalize_twitter_profile_url(profile, media_only=False)
     base = base.rstrip("/")
@@ -139,6 +142,11 @@ def _cookies_header_from_netscape_file(path: str) -> str | None:
         parts = line.split("\t")
         if len(parts) < 7:
             continue
+
+        domain = str(parts[0] or "").lstrip(".").casefold()
+        if "twitter.com" not in domain and "x.com" not in domain:
+            continue
+
         name = (parts[5] or "").strip()
         value = (parts[6] or "").strip()
         if not name:

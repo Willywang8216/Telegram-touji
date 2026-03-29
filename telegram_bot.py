@@ -532,6 +532,7 @@ async def _ensure_twitter_watch_routes(cfg: dict, sources: list[object]) -> bool
 async def twitter_watch_loop() -> None:
     next_run: dict[str, float] = {}
     bot_cache: dict[str, object] = {}
+    warned_missing_cookies = False
 
     while True:
         try:
@@ -559,6 +560,10 @@ async def twitter_watch_loop() -> None:
                 cookies_file = (cfg.get("relay", {}) or {}).get("twitter_cookies_file")
             if not cookies_file and Path("twitter.cookies.txt").exists():
                 cookies_file = "twitter.cookies.txt"
+
+            if cookies_file and not Path(str(cookies_file)).exists() and not warned_missing_cookies:
+                warned_missing_cookies = True
+                log_event(logger, logging.ERROR, "twitter_watch_cookies_missing", cookies_file=str(cookies_file))
 
             now = time.monotonic()
             for src in sources:
