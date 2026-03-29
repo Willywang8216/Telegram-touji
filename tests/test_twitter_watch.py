@@ -5,6 +5,7 @@ from twitter_watch import (
     _cookies_header_from_netscape_file,
     _extract_tweet_entries,
     _extract_tweet_urls_from_html,
+    _tweet_urls_from_syndication_html,
     candidate_profile_urls,
     normalize_twitter_profile_url,
     tweet_id_from_url,
@@ -77,6 +78,11 @@ class TestTwitterWatchHelpers(unittest.TestCase):
 <a href=\"https://x.com/jack/status/21?s=1\">t</a>
 </body></html>"""
         urls = _extract_tweet_urls_from_html(html, base_url="https://x.com/jack/media")
+        self.assertEqual(urls, ["https://x.com/jack/status/20", "https://x.com/jack/status/21"])
+
+    def test_extract_urls_from_syndication_html(self):
+        html = """<div data-tweet-id=\"20\"></div><div data-tweet-id=\"21\"></div>"""
+        urls = _tweet_urls_from_syndication_html(html, handle="jack")
         self.assertEqual(urls, ["https://x.com/jack/status/20", "https://x.com/jack/status/21"])
 
 

@@ -160,6 +160,7 @@ def _cookies_header_from_netscape_file(path: str) -> str | None:
 
 
 _REL_TWEET_HREF_RE = re.compile(r"href=\"(?P<href>/[^\"<>\s]*/status/\d+[^\"<>\s]*)\"")
+_DATA_TWEET_ID_RE = re.compile(r"data-tweet-id=\"(?P<id>\d+)\"")
 
 
 def _extract_tweet_urls_from_html(html: str, *, base_url: str) -> list[str]:
@@ -180,6 +181,48 @@ def _extract_tweet_urls_from_html(html: str, *, base_url: str) -> list[str]:
     seen: set[str] = set()
     uniq: list[str] = []
     for x in out:
+        if x in seen:
+            continue
+        seen.add(x)
+        uniq.append(x)
+
+    return uniq
+
+
+def _extract_handle_from_profile_url(url: str) -> str | None:
+    u = urllib.parse.urlparse(str(url or ""))
+    path = (u.path or "").strip("/")
+    if not path:
+        return None
+    head = path.split("/", 1)[0].strip()
+    if not head or head in {"i", "home", "search", "intent", "explore"}:
+        return None
+    return head
+
+
+def _syndication_profile_url(handle: str) -> str:
+    # Public endpoint often used by embeddable timelines.
+    return f"https://syndication.twitter.com/srv/timeline-profile/screen-name/{handle}"
+
+
+def _tweet_urls_from_syndication_html(html: str, *, handle: str) -> list[str]:
+    out: list[str] = []
+
+    # The syndication HTML typically contains data-tweet-id attributes.
+    for m in _DATA_TWEET_ID_RE.finditer(html or ""):
+        tid = m.group("id")
+        if tid:
+            out.append(f"https://x.com/{handle}/status/{tid}")
+
+    out.extend(extract_tweet_urls(html))
+
+    # De-dupe while preserving order.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for x in out:
+        x = str(x or "").strip()
+        if not x:
+            continue
         if x in seen:
             continue
         seen.add(x)
@@ -225,6 +268,28 @@ def _list_profile_tweets_via_html(
         raise RuntimeError("not_authenticated")
 
     urls = _extract_tweet_urls_from_html(html, base_url=str(final_url))
+
+    if not urls:
+        # Fallback: syndication endpoint used by embedded timelines.
+        handle = _extract_handle_from_profile_url(str(final_url))
+        if handle:
+            syndication_url = _syndication_profile_url(handle)
+            req2 = urllib.request.Request(
+                syndication_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Cookie": cookie_header,
+                },
+                method="GET",
+            )
+
+            with urllib.request.urlopen(req2, timeout=20) as resp2:
+                body2 = resp2.read()
+            html2 = body2.decode("utf-8", errors="ignore")
+            urls = _tweet_urls_from_syndication_html(html2, handle=handle)
+
     if not urls:
         raise RuntimeError("no_tweet_urls_found")
 
