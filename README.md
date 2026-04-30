@@ -375,3 +375,13 @@ python -m unittest discover -s tests -v
 python -m py_compile telegram_bot.py bot_relay.py common_config.py structured_logger.py delivery.py command_utils.py twitter_expand.py
 bash -n scripts/install.sh
 ```
+
+## Engineering review summary
+
+The codebase is already fairly focused and there are no obviously safe-to-delete core modules from a static pass. The main improvement areas are:
+
+- Efficiency: reduce duplicate logic between `telegram_bot.py` and `bot_relay.py` over time by extracting shared relay filters into a common module.
+- Security: avoid mutable startup installs in production if you need reproducible deployments; the current `run_userbot.sh` and `run_relaybot.sh` intentionally self-update `yt-dlp` for X/Twitter compatibility, which favors operability over supply-chain stability.
+- Robustness: `.env` is now reloaded on config hot-reload checks as well, so environment changes in the config directory are picked up consistently.
+- Scalability: route resolution is configuration-driven and adequate for the current size, but if route count grows substantially, pre-indexing routes by source chat/topic would reduce repeated linear scans.
+- User experience: route/topic tooling is strong; the highest-value follow-up would be clearer operator docs around session locking, cookies handling, and route export/import workflows.

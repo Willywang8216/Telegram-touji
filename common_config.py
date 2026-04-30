@@ -39,6 +39,7 @@ class ConfigManager:
         return self._config
 
     def reload_if_changed(self) -> bool:
+        self._load_dotenv()
         mtime = self.path.stat().st_mtime
         if self._mtime is None or mtime != self._mtime:
             self.load(force=True)

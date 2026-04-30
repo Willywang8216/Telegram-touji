@@ -164,10 +164,9 @@ _DATA_TWEET_ID_RE = re.compile(r"data-tweet-id=\"(?P<id>\d+)\"")
 
 
 def _extract_tweet_urls_from_html(html: str, *, base_url: str) -> list[str]:
-    # 1) Full URLs already in the document.
-    out = extract_tweet_urls(html)
+    out: list[str] = []
 
-    # 2) Relative hrefs.
+    # 1) Relative hrefs in DOM order.
     u = urllib.parse.urlparse(base_url)
     prefix = f"{u.scheme}://{u.netloc}"
 
@@ -176,6 +175,9 @@ def _extract_tweet_urls_from_html(html: str, *, base_url: str) -> list[str]:
         if not href:
             continue
         out.extend(extract_tweet_urls(prefix + href))
+
+    # 2) Full URLs already in the document.
+    out.extend(extract_tweet_urls(html))
 
     # De-dupe while preserving order.
     seen: set[str] = set()

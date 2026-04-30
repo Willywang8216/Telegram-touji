@@ -17,7 +17,6 @@ class TestSyntax(unittest.TestCase):
             Path("twitter_expansion.py"),
             Path("twitter_watch.py"),
             Path("route_filter_utils.py"),
-            Path("route_filter_utils.py"),
             Path("scripts/sync_forum_topics.py"),
             Path("scripts/dedupe_forum_topics.py"),
             Path("scripts/export_forum_topic_ids.py"),
