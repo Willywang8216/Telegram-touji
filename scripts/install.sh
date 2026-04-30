@@ -69,7 +69,7 @@ PY
   cat > config.json <<EOF
 {
   "api_id": ${API_ID},
-  "api_hash": "${API_HASH}",
+  "api_hash": "",
   "master_account_id": ${MASTER_ACCOUNT_ID},
   "bot_mappings": [
     {
@@ -79,8 +79,8 @@ PY
   ],
   "relay": {
     "api_id": ${API_ID},
-    "api_hash": "${API_HASH}",
-    "bot_token": "${BOT_TOKEN}",
+    "api_hash": "",
+    "bot_token": "",
     "dest_channels": ${DEST_CHANNELS_JSON},
     "master_account_id": ${RELAY_MASTER_ACCOUNT_ID}
   },
@@ -100,6 +100,7 @@ RELAY_MASTER_ACCOUNT_ID=${RELAY_MASTER_ACCOUNT_ID}
 EOF
 
   echo "[OK] 已生成 config.json 与 .env"
+  echo "[INFO] 敏感凭据已优先写入 .env；config.json 中保留为空，运行时会从环境变量读取。"
 else
   echo "[INFO] 保留现有配置"
 fi
