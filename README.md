@@ -41,7 +41,8 @@ Special handling:
 ### 1) Configure
 
 - Copy `config.example.json` to `config.json`.
-- Put secrets in `.env` when possible.
+- Copy `.env.example` to `.env`.
+- Put secrets in `.env` rather than `config.json`.
 
 ### 2) Start
 
@@ -362,6 +363,12 @@ Failures are recorded as JSONL:
 
 - `logs/userbot_dlq.jsonl`
 - `logs/relay_dlq.jsonl`
+
+## Security / operations notes
+
+- `.env`, Telegram session files, cookies, logs, and local state are excluded from Docker build context via `.dockerignore`.
+- Prefer keeping `api_hash` and `relay.bot_token` only in `.env`; runtime config loading already supports environment overrides.
+- The startup scripts still best-effort upgrade `yt-dlp` because X/Twitter extraction breaks frequently. If you need stricter reproducibility, remove that startup update behavior and rebuild images explicitly when upgrading.
 
 ### “My user account is posting into the destination chat”
 

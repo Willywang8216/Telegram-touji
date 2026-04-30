@@ -13,6 +13,21 @@ from telethon import Button, TelegramClient, events, functions, types, utils
 from command_utils import parse_command
 from common_config import ConfigManager, load_relay_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from relay_filters import (
+    count_links,
+    document_meta_text,
+    filter_haystack,
+    has_too_many_links,
+    is_blocked,
+    is_disallowed_document,
+    is_gif_or_sticker,
+    is_link_only,
+    is_location_message,
+    is_photo_message,
+    is_short_video,
+    is_video_message,
+    video_duration_seconds,
+)
 from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import download_tweet_media, extract_tweet_urls
 from route_filter_utils import filter_routes, parse_route_filters
@@ -38,16 +53,9 @@ except ModuleNotFoundError:  # pragma: no cover
 
 DLQ_PATH = "logs/relay_dlq.jsonl"
 MEDIA_CAPTION_LIMIT = 1024
-_MAX_LINKS = 3
-_MIN_VIDEO_DURATION_SECONDS = 5
 
 _IMAGE_FILE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 _VIDEO_FILE_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".m4v", ".avi"}
-
-_DISALLOWED_DOC_EXTS = {".txt", ".pdf"}
-_DISALLOWED_DOC_MIMES = {"text/plain", "application/pdf"}
-
-_URL_RE = re.compile(r"(?i)(?:\bhttps?://|\bwww\.|\bt\.me/)\S+")
 
 _TITLE_WS_RE = re.compile(r"\s+")
 _EMBEDDED_SOURCE_MARKERS_RE = re.compile(r"^\u2063SRC_CHAT_ID=(-?\d+)\n?(?:\u2063SRC_TOPIC_ID=(\d+)\n?)?")
@@ -641,151 +649,44 @@ class RelayBot:
         captions = self.current_settings().get("post_captions", {}) or {}
         return captions.get(int(chat_id))
 
-    _EXTRA_BLOCKLIST_SUBSTRINGS = [
-        "正品",
-        "正版",
-        "高仿",
-        "水果",
-        "手機",
-        "emby",
-    ]
-
     def _is_blocked(self, text: str) -> bool:
-        hay = str(text or "").casefold()
-        for s in (self.current_settings().get("blocklist_substrings", []) or []) + self._EXTRA_BLOCKLIST_SUBSTRINGS:
-            if not s:
-                continue
-            if str(s).casefold() in hay:
-                return True
-        return False
+        return is_blocked(text, self.current_settings().get("blocklist_substrings", []) or [])
 
     def _count_links(self, text: str | None) -> int:
-        if not text:
-            return 0
-        return len(list(_URL_RE.finditer(str(text))))
+        return count_links(text)
 
     def _has_too_many_links(self, text: str | None) -> bool:
-        return self._count_links(text) > _MAX_LINKS
+        return has_too_many_links(text)
 
     def _is_link_only(self, text: str | None) -> bool:
-        s = str(text or "").strip()
-        if not s:
-            return False
-        rest = _URL_RE.sub(" ", s)
-        rest = re.sub(r"[\s\-–—.,;:!?()\[\]{}<>\"'“”‘’]+", " ", rest)
-        return not rest.strip()
+        return is_link_only(text)
 
     def _document_meta_text(self, msg) -> str:
-        parts: list[str] = []
-
-        doc = getattr(msg, "document", None)
-        if doc is not None:
-            mime = str(getattr(doc, "mime_type", "") or "")
-            if mime:
-                parts.append(mime)
-            for attr in getattr(doc, "attributes", []) or []:
-                fn = getattr(attr, "file_name", None)
-                if fn:
-                    parts.append(str(fn))
-                alt = getattr(attr, "alt", None)
-                if alt:
-                    parts.append(str(alt))
-                title = getattr(attr, "title", None)
-                if title:
-                    parts.append(str(title))
-                performer = getattr(attr, "performer", None)
-                if performer:
-                    parts.append(str(performer))
-
-        media = getattr(msg, "media", None)
-        wp = getattr(media, "webpage", None)
-        if wp is not None:
-            for k in ("url", "site_name", "title", "description"):
-                v = getattr(wp, k, None)
-                if v:
-                    parts.append(str(v))
-
-        return "\n".join([p for p in parts if str(p).strip()])
+        return document_meta_text(msg)
 
     def _filter_haystack(self, msg, stripped_original_text: str) -> str:
-        parts = [stripped_original_text]
-        meta = self._document_meta_text(msg)
-        if meta:
-            parts.append(meta)
-        return "\n".join([p for p in parts if str(p).strip()])
+        return filter_haystack(stripped_original_text, msg)
 
     def _is_gif_or_sticker(self, msg) -> bool:
-        if getattr(msg, "gif", None) is not None:
-            return True
-        if getattr(msg, "sticker", None) is not None:
-            return True
-
-        doc = getattr(msg, "document", None)
-        for attr in getattr(doc, "attributes", []) or []:
-            if isinstance(attr, types.DocumentAttributeSticker):
-                return True
-            if isinstance(attr, types.DocumentAttributeAnimated):
-                return True
-        return False
+        return is_gif_or_sticker(msg, telethon_types=types)
 
     def _is_disallowed_document(self, msg) -> bool:
-        doc = getattr(msg, "document", None)
-        if doc is None:
-            return False
-
-        mime = str(getattr(doc, "mime_type", "") or "").casefold()
-        if mime in _DISALLOWED_DOC_MIMES:
-            return True
-
-        for attr in getattr(doc, "attributes", []) or []:
-            fn = getattr(attr, "file_name", None)
-            if not fn:
-                continue
-            ext = Path(str(fn)).suffix.lower()
-            if ext in _DISALLOWED_DOC_EXTS:
-                return True
-
-        return False
+        return is_disallowed_document(msg)
 
     def _is_location_message(self, msg) -> bool:
-        media = getattr(msg, "media", None)
-        if media is None:
-            return False
-        return isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue))
+        return is_location_message(msg, telethon_types=types)
 
     def _is_video_message(self, msg) -> bool:
-        return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
+        return is_video_message(msg)
 
     def _video_duration_seconds(self, msg) -> int | None:
-        doc = getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None)
-        if doc is None:
-            doc = getattr(msg, "document", None)
-
-        for attr in getattr(doc, "attributes", []) or []:
-            if isinstance(attr, types.DocumentAttributeVideo):
-                try:
-                    return int(getattr(attr, "duration", 0) or 0)
-                except Exception:  # noqa: BLE001
-                    return None
-
-        return None
+        return video_duration_seconds(msg, telethon_types=types)
 
     def _is_short_video(self, msg) -> bool:
-        if not self._is_video_message(msg):
-            return False
-        dur = self._video_duration_seconds(msg)
-        return dur is not None and dur < _MIN_VIDEO_DURATION_SECONDS
+        return is_short_video(msg, telethon_types=types)
 
     def _is_photo_message(self, msg) -> bool:
-        if getattr(msg, "photo", None) is not None:
-            return True
-
-        doc = getattr(msg, "document", None)
-        mime = str(getattr(doc, "mime_type", "") or "")
-        if mime.startswith("image/") and not self._is_video_message(msg):
-            return True
-
-        return False
+        return is_photo_message(msg)
 
     def _looks_like_video_path(self, path: str) -> bool:
         ext = Path(str(path)).suffix.lower()
