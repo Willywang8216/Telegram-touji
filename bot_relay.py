@@ -30,7 +30,13 @@ from relay_filters import (
 )
 from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import download_tweet_media, extract_tweet_urls
-from route_filter_utils import filter_routes, parse_route_filters
+from route_manager import (
+    build_routes_report,
+    format_destinations,
+    normalize_routes_filter_args,
+    parse_destinations_tokens,
+    resolve_message_link,
+)
 
 try:
     from structured_logger import get_logger, log_event
@@ -794,117 +800,6 @@ class RelayBot:
             )
             return None
 
-    async def _resolve_message_link(self, link: str) -> tuple[int, int, int | None]:
-        parsed = parse_message_link(link)
-        if not parsed:
-            raise ValueError("invalid_link")
-
-        ent = await self.client.get_entity(parsed.chat)
-        chat_id = int(utils.get_peer_id(ent))
-
-        msg = await self.client.get_messages(ent, ids=int(parsed.message_id))
-        if not msg:
-            raise ValueError("message_not_found")
-
-        reply_to = getattr(msg, "reply_to", None)
-        top = getattr(reply_to, "reply_to_top_id", None)
-        topic_top = int(top) if top else (int(msg.id) if getattr(msg, "is_topic", False) else None)
-        if topic_top is None and parsed.topic_id is not None:
-            topic_top = int(parsed.topic_id)
-
-        return chat_id, int(parsed.message_id), topic_top
-
-    def _parse_destinations_tokens(self, tokens: list[str]) -> list[dict[str, Any]]:
-        out: list[dict[str, Any]] = []
-        for tok in tokens:
-            if not tok:
-                continue
-            if "@" in tok:
-                chat_str, topic_str = tok.split("@", 1)
-                out.append({"chat_id": int(chat_str), "topic_id": int(topic_str)})
-                continue
-            if "=" in tok:
-                chat_str, title = tok.split("=", 1)
-                out.append({"chat_id": int(chat_str), "topic_title": title.strip()})
-                continue
-            out.append({"chat_id": int(tok)})
-        return out
-
-    def _format_destinations(self, destinations: list[dict[str, Any]]) -> str:
-        parts: list[str] = []
-        for d in destinations or []:
-            chat_id = d.get("chat_id")
-            if d.get("topic_id") is not None:
-                parts.append(f"{chat_id}@{d.get('topic_id')}")
-            elif d.get("topic_title"):
-                parts.append(f"{chat_id}=\"{d.get('topic_title')}\"")
-            else:
-                parts.append(str(chat_id))
-        return " ".join(parts)
-
-    def _save_config_and_reload(self, cfg: dict[str, Any]) -> None:
-        self.config_manager.save(cfg)
-        self.settings = load_relay_settings(self.config_manager)
-        self._maybe_log_topic_config_warning(self.settings)
-
-    async def _normalize_routes_filter_args(self, event, args: str) -> str | None:
-        tokens = shlex.split(args or "")
-        if not tokens:
-            return (args or "").strip()
-
-        dest_ids: list[int] = []
-        topic_top: int | None = None
-        topic_title: str | None = None
-        keep: list[str] = []
-
-        for tok in tokens:
-            if looks_like_message_link(tok):
-                try:
-                    chat_id, _, top = await self._resolve_message_link(tok)
-                except Exception as exc:  # noqa: BLE001
-                    await event.reply(f"🤖 错误: 无法解析链接: {tok} ({type(exc).__name__})")
-                    return None
-
-                dest_ids.append(int(chat_id))
-
-                if top is not None and topic_top is None:
-                    topic_top = int(top)
-
-                    if topic_top == 1:
-                        topic_title = "General"
-                    else:
-                        try:
-                            ent = await self.client.get_entity(int(chat_id))
-                            msg = await self.client.get_messages(ent, ids=int(topic_top))
-                            action = getattr(msg, "action", None) if msg else None
-                            title = getattr(action, "title", None) if action else None
-                            if title:
-                                topic_title = str(title)
-                        except Exception:  # noqa: BLE001
-                            topic_title = None
-
-                continue
-
-            keep.append(tok)
-
-        if dest_ids:
-            seen: set[int] = set()
-            uniq: list[int] = []
-            for d in dest_ids:
-                if d in seen:
-                    continue
-                seen.add(d)
-                uniq.append(d)
-            keep.append("dest=" + ",".join(str(x) for x in uniq))
-
-        # Prefer filtering by resolved topic title (works for both topic_id and topic_title routes).
-        if topic_title:
-            keep.append("topic=" + shlex.quote(topic_title))
-        elif topic_top is not None:
-            keep.append(f"topic_id={int(topic_top)}")
-
-        return " ".join([x for x in keep if str(x).strip()]).strip()
-
     def _menu_buttons(self, menu: str) -> list[list[Any]]:
         menu = (menu or "main").strip().lower()
 
@@ -996,7 +891,7 @@ class RelayBot:
             await self.client.send_message(chat_id, message="🤖 routes 为空")
             return
 
-        text = await self._build_routes_report(list(routes), args)
+        text = await build_routes_report(self.client, list(routes), args)
         if not text:
             await self.client.send_message(chat_id, message="🤖 未匹配到 routes。")
             return
@@ -1022,7 +917,7 @@ class RelayBot:
             await self.client.send_message(chat_id, message="🤖 routes 为空")
             return
 
-        text = await self._build_routes_report(list(routes), args)
+        text = await build_routes_report(self.client, list(routes), args)
         if not text:
             await self.client.send_message(chat_id, message="🤖 未匹配到 routes。")
             return
@@ -1137,210 +1032,6 @@ class RelayBot:
         if key == "xwatch:list":
             await self._send_x_watch_list(int(event.chat_id))
             return
-
-    async def _build_routes_report(self, routes: list[dict[str, Any]], args: str) -> str | None:
-        entity_cache: dict[int, object] = {}
-        topic_title_cache: dict[tuple[int, int], str] = {}
-
-        async def _get_entity(chat_id: int):
-            if chat_id in entity_cache:
-                return entity_cache[chat_id]
-            ent = await self.client.get_entity(chat_id)
-            entity_cache[chat_id] = ent
-            return ent
-
-        def _entity_label(ent) -> str:
-            title = getattr(ent, "title", None)
-            username = getattr(ent, "username", None)
-            if title and username:
-                return f"{title} (@{username})"
-            if title:
-                return str(title)
-            if username:
-                return f"@{username}"
-            return str(getattr(ent, "id", ""))
-
-        def _internal_chat_id(chat_id: int) -> int | None:
-            if str(int(chat_id)).startswith("-100"):
-                return abs(int(chat_id)) - 1000000000000
-            return None
-
-        def _chat_link(ent, chat_id: int) -> str | None:
-            username = getattr(ent, "username", None)
-            if username:
-                return f"https://t.me/{username}"
-            internal = _internal_chat_id(chat_id)
-            if internal is not None:
-                return f"https://t.me/c/{internal}/1"
-            return None
-
-        def _message_link(ent, chat_id: int, msg_id: int) -> str | None:
-            username = getattr(ent, "username", None)
-            if username:
-                return f"https://t.me/{username}/{int(msg_id)}"
-            internal = _internal_chat_id(chat_id)
-            if internal is not None:
-                return f"https://t.me/c/{internal}/{int(msg_id)}"
-            return None
-
-        async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
-            if top_message_id == 1:
-                return "General"
-
-            key = (chat_id, top_message_id)
-            if key in topic_title_cache:
-                return topic_title_cache[key]
-
-            ent = await _get_entity(chat_id)
-            msg = await self.client.get_messages(ent, ids=int(top_message_id))
-            if not msg:
-                return None
-
-            action = getattr(msg, "action", None)
-            title = getattr(action, "title", None)
-            if not title:
-                return None
-
-            topic_title_cache[key] = str(title)
-            return str(title)
-
-        filtered = list(routes)
-        if (args or "").strip():
-            flt = parse_route_filters(args or "")
-            topic_sub = str(flt.get("topic") or "").casefold().strip() or None
-
-            base = dict(flt)
-            base["topic"] = None
-            filtered = filter_routes(list(routes), filters=base)
-
-            if topic_sub is not None:
-                matched: list[dict[str, Any]] = []
-                for r in filtered:
-                    ok = False
-                    for d in (r.get("destinations") or []):
-                        if topic_sub in str(d.get("topic_title") or "").casefold():
-                            ok = True
-                            break
-
-                        if d.get("topic_id") is not None and d.get("chat_id") is not None:
-                            try:
-                                title = await _topic_title(int(d.get("chat_id")), int(d.get("topic_id")))
-                            except Exception:  # noqa: BLE001
-                                title = None
-                            if title and topic_sub in str(title).casefold():
-                                ok = True
-                                break
-
-                    if ok:
-                        matched.append(r)
-                filtered = matched
-
-        if not filtered:
-            return None
-
-        keep = {id(r) for r in filtered}
-
-        out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
-        if (args or "").strip():
-            out.append(f"Filters: {args}")
-        out.append("Tip: use /export_routes to always download a file.")
-
-        for idx, r in enumerate(routes, start=1):
-            if id(r) not in keep:
-                continue
-
-            out.append(f"\n{idx})")
-
-            source_chats = [int(x) for x in (r.get("source_chats") or [])]
-            source_topics = [int(x) for x in (r.get("source_topics") or [])]
-            destinations = list(r.get("destinations") or [])
-
-            out.append("  Sources:")
-            for cid in source_chats:
-                ent = None
-                label = None
-                url = None
-                try:
-                    ent = await _get_entity(cid)
-                    label = _entity_label(ent)
-                    url = _chat_link(ent, cid)
-                except Exception:  # noqa: BLE001
-                    ent = None
-
-                line = f"    - {cid}"
-                if label:
-                    line += f" | {label}"
-                if url:
-                    line += f" | {url}"
-                out.append(line)
-
-                if source_topics:
-                    topic_parts: list[str] = []
-                    for tid in source_topics:
-                        try:
-                            title = await _topic_title(cid, tid)
-                        except Exception:  # noqa: BLE001
-                            title = None
-
-                        part = str(tid)
-                        if title:
-                            part += f" | {title}"
-
-                        if ent is not None:
-                            turl = _message_link(ent, cid, tid)
-                            if turl:
-                                part += f" | {turl}"
-
-                        topic_parts.append(part)
-                    out.append("      topics: " + "; ".join(topic_parts))
-                else:
-                    try:
-                        ent2 = ent or (entity_cache.get(cid) or await _get_entity(cid))
-                        if getattr(ent2, "forum", False):
-                            out.append("      topics: ALL")
-                    except Exception:  # noqa: BLE001
-                        pass
-
-            out.append("  Destinations:")
-            for d in destinations:
-                chat_id = int(d.get("chat_id"))
-                ent = None
-                chat_label = None
-                chat_url = None
-                try:
-                    ent = await _get_entity(chat_id)
-                    chat_label = _entity_label(ent)
-                    chat_url = _chat_link(ent, chat_id)
-                except Exception:  # noqa: BLE001
-                    ent = None
-
-                line = f"    - {chat_id}"
-                if chat_label:
-                    line += f" | {chat_label}"
-                if chat_url:
-                    line += f" | {chat_url}"
-
-                if d.get("topic_id") is not None:
-                    topic_id = int(d.get("topic_id"))
-                    topic_label = None
-                    try:
-                        topic_label = await _topic_title(chat_id, topic_id)
-                    except Exception:  # noqa: BLE001
-                        topic_label = None
-
-                    line += f" | topic_id={topic_id}"
-                    if topic_label:
-                        line += f" | {topic_label}"
-                    if ent is not None:
-                        turl = _message_link(ent, chat_id, topic_id)
-                        if turl:
-                            line += f" | {turl}"
-                elif d.get("topic_title"):
-                    line += f" | topic_title=\"{d.get('topic_title')}\""
-
-                out.append(line)
-
-        return "\n".join(out)
 
     async def _handle_command(self, event, stripped_text: str) -> None:
         cmd, args = parse_command(stripped_text)
@@ -1512,7 +1203,7 @@ class RelayBot:
                 for t in dest_tokens:
                     if looks_like_message_link(t):
                         try:
-                            chat_id, _, topic_top = await self._resolve_message_link(t)
+                            chat_id, _, topic_top = await resolve_message_link(self.client, t)
                         except Exception as exc:  # noqa: BLE001
                             await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
                             return
@@ -1546,7 +1237,7 @@ class RelayBot:
                 for t in positional:
                     if looks_like_message_link(t):
                         try:
-                            chat_id, _, topic_top = await self._resolve_message_link(t)
+                            chat_id, _, topic_top = await resolve_message_link(self.client, t)
                         except Exception as exc:  # noqa: BLE001
                             await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
                             return
@@ -1575,7 +1266,7 @@ class RelayBot:
                 await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
                 return
 
-            destinations.extend(self._parse_destinations_tokens(non_link_dest_tokens))
+            destinations.extend(parse_destinations_tokens(non_link_dest_tokens))
             destinations = _dedupe_destinations(destinations)
 
             new_entry: dict[str, Any] = {
@@ -1636,7 +1327,7 @@ class RelayBot:
                 await event.reply(
                     "🤖 已添加 twitter_watch source，并已添加/更新 route。\n"
                     f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot} | interval={new_entry['poll_interval_sec']}s | fetch_limit={new_entry['fetch_limit']}\n"
-                    f"destinations={self._format_destinations(destinations)}"
+                    f"destinations={format_destinations(destinations)}"
                 )
             else:
                 await event.reply(
@@ -1683,11 +1374,11 @@ class RelayBot:
                 await event.reply("🤖 routes 为空")
                 return
 
-            args2 = await self._normalize_routes_filter_args(event, args)
+            args2 = await normalize_routes_filter_args(self.client, event, args)
             if args2 is None:
                 return
 
-            text = await self._build_routes_report(list(routes), args2)
+            text = await build_routes_report(self.client, list(routes), args2)
             if not text:
                 await event.reply(
                     "🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]\n"
@@ -1717,11 +1408,11 @@ class RelayBot:
                 await event.reply("🤖 routes 为空")
                 return
 
-            args2 = await self._normalize_routes_filter_args(event, args)
+            args2 = await normalize_routes_filter_args(self.client, event, args)
             if args2 is None:
                 return
 
-            text = await self._build_routes_report(list(routes), args2)
+            text = await build_routes_report(self.client, list(routes), args2)
             if not text:
                 await event.reply("🤖 未匹配到 routes。")
                 return
@@ -1765,7 +1456,7 @@ class RelayBot:
                 non_link_dest_tokens: list[str] = []
                 for t in tokens[1:]:
                     if looks_like_message_link(t):
-                        chat_id, _, topic_top = await self._resolve_message_link(t)
+                        chat_id, _, topic_top = await resolve_message_link(self.client, t)
                         dest: dict[str, Any] = {"chat_id": int(chat_id)}
                         if topic_top is not None:
                             dest["topic_id"] = int(topic_top)
@@ -1773,7 +1464,7 @@ class RelayBot:
                     else:
                         non_link_dest_tokens.append(t)
 
-                destinations.extend(self._parse_destinations_tokens(non_link_dest_tokens))
+                destinations.extend(parse_destinations_tokens(non_link_dest_tokens))
                 if not destinations:
                     await event.reply("🤖 错误: destinations 为空")
                     return
@@ -1803,7 +1494,7 @@ class RelayBot:
                     continue
                 dest_tokens.append(t)
 
-            destinations = self._parse_destinations_tokens(dest_tokens)
+            destinations = parse_destinations_tokens(dest_tokens)
             if not destinations:
                 await event.reply("🤖 错误: destinations 为空")
                 return
@@ -1860,7 +1551,7 @@ class RelayBot:
             non_link_tokens: list[str] = []
             for t in tokens[1:]:
                 if looks_like_message_link(t):
-                    chat_id, _, topic_top = await self._resolve_message_link(t)
+                    chat_id, _, topic_top = await resolve_message_link(self.client, t)
                     dest: dict[str, Any] = {"chat_id": int(chat_id)}
                     if topic_top is not None:
                         dest["topic_id"] = int(topic_top)
@@ -1868,7 +1559,7 @@ class RelayBot:
                 else:
                     non_link_tokens.append(t)
 
-            destinations.extend(self._parse_destinations_tokens(non_link_tokens))
+            destinations.extend(parse_destinations_tokens(non_link_tokens))
 
             cfg = self.config_manager.load(force=True)
             relay = cfg.get("relay", {}) or {}
