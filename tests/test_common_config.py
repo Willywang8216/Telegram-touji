@@ -116,6 +116,16 @@ class TestCommonConfig(unittest.TestCase):
         cfg2 = m.load(force=True)
         self.assertEqual(cfg2["master_account_id"], 999)
 
+    def test_reload_if_changed_loads_local_dotenv(self):
+        env_path = Path(self.tmp.name) / ".env"
+        env_path.write_text("RELAY_MASTER_ACCOUNT_ID=456\n", encoding="utf-8")
+
+        m = ConfigManager(str(self.path))
+        changed = m.reload_if_changed()
+
+        self.assertTrue(changed)
+        self.assertEqual(os.environ.get("RELAY_MASTER_ACCOUNT_ID"), "456")
+
 
 if __name__ == "__main__":
     unittest.main()

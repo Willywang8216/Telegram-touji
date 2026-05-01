@@ -1,5 +1,4 @@
 services:
-  # 服务1: 用户机器人 (负责从源频道偷消息 -> 发给机器人)
   userbot:
     build: .
     container_name: toujibot_user
@@ -14,7 +13,6 @@ services:
     stdin_open: true
     tty: true
 
-  # 服务2: 机器人转发 (负责从私聊接收 -> 广播到最终频道)
   relaybot:
     build: .
     container_name: toujibot_relay

@@ -41,7 +41,8 @@ Special handling:
 ### 1) Configure
 
 - Copy `config.example.json` to `config.json`.
-- Put secrets in `.env` when possible.
+- Copy `.env.example` to `.env`.
+- Put secrets in `.env` rather than `config.json`.
 
 ### 2) Start
 
@@ -363,6 +364,12 @@ Failures are recorded as JSONL:
 - `logs/userbot_dlq.jsonl`
 - `logs/relay_dlq.jsonl`
 
+## Security / operations notes
+
+- `.env`, Telegram session files, cookies, logs, and local state are excluded from Docker build context via `.dockerignore`.
+- Prefer keeping `api_hash` and `relay.bot_token` only in `.env`; runtime config loading already supports environment overrides.
+- The startup scripts still best-effort upgrade `yt-dlp` because X/Twitter extraction breaks frequently. If you need stricter reproducibility, remove that startup update behavior and rebuild images explicitly when upgrading.
+
 ### “My user account is posting into the destination chat”
 
 - Ensure `bot_mappings[].target_bot` is a bot username (`@...`), not a channel.
@@ -375,3 +382,13 @@ python -m unittest discover -s tests -v
 python -m py_compile telegram_bot.py bot_relay.py common_config.py structured_logger.py delivery.py command_utils.py twitter_expand.py
 bash -n scripts/install.sh
 ```
+
+## Engineering review summary
+
+The codebase is already fairly focused and there are no obviously safe-to-delete core modules from a static pass. The main improvement areas are:
+
+- Efficiency: reduce duplicate logic between `telegram_bot.py` and `bot_relay.py` over time by extracting shared relay filters into a common module.
+- Security: avoid mutable startup installs in production if you need reproducible deployments; the current `run_userbot.sh` and `run_relaybot.sh` intentionally self-update `yt-dlp` for X/Twitter compatibility, which favors operability over supply-chain stability.
+- Robustness: `.env` is now reloaded on config hot-reload checks as well, so environment changes in the config directory are picked up consistently.
+- Scalability: route resolution is configuration-driven and adequate for the current size, but if route count grows substantially, pre-indexing routes by source chat/topic would reduce repeated linear scans.
+- User experience: route/topic tooling is strong; the highest-value follow-up would be clearer operator docs around session locking, cookies handling, and route export/import workflows.

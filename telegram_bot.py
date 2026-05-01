@@ -1,10 +1,8 @@
 import asyncio
 import logging
-import re
 import shlex
 import tempfile
 import time
-from pathlib import Path
 
 from twitter_watch import ensure_parent_dir, list_profile_tweets, tweet_id_from_url
 
@@ -16,9 +14,30 @@ from telethon.tl.functions.channels import JoinChannelRequest, LeaveChannelReque
 from command_utils import parse_command
 from common_config import ConfigManager, load_userbot_settings
 from delivery import AsyncRateLimiter, with_retry, write_dlq
+from relay_filters import (
+    count_links,
+    document_meta_text,
+    filter_haystack,
+    has_too_many_links,
+    is_blocked,
+    is_disallowed_document,
+    is_gif_or_sticker,
+    is_link_only,
+    is_location_message,
+    is_photo_message,
+    is_short_video,
+    is_video_message,
+    video_duration_seconds,
+)
 from telegram_link_utils import looks_like_message_link, parse_message_link
 from twitter_expand import extract_tweet_urls
-from route_filter_utils import filter_routes, parse_route_filters
+from route_manager import (
+    build_routes_report,
+    format_destinations,
+    normalize_routes_filter_args,
+    parse_destinations_tokens,
+    resolve_message_link,
+)
 
 try:
     from structured_logger import get_logger, log_event
@@ -96,170 +115,11 @@ def _compute_ignored_source_chats(cfg: dict) -> set[int]:
 
 ignored_source_chats = _compute_ignored_source_chats(config_manager.load())
 
-
-def _is_blocked(text: str) -> bool:
-    hay = str(text or "").casefold()
-    for s in (blocklist_substrings or []) + _EXTRA_BLOCKLIST_SUBSTRINGS:
-        if not s:
-            continue
-        if str(s).casefold() in hay:
-            return True
-    return False
-
-
-def _count_links(text: str | None) -> int:
-    if not text:
-        return 0
-    return len(list(_URL_RE.finditer(str(text))))
-
-
-def _has_too_many_links(text: str | None) -> bool:
-    return _count_links(text) > _MAX_LINKS
-
-
-def _is_link_only(text: str | None) -> bool:
-    s = str(text or "").strip()
-    if not s:
-        return False
-    rest = _URL_RE.sub(" ", s)
-    rest = re.sub(r"[\s\-–—.,;:!?()\[\]{}<>\"'“”‘’]+", " ", rest)
-    return not rest.strip()
-
-
-def _document_meta_text(msg) -> str:
-    parts: list[str] = []
-    doc = getattr(msg, "document", None)
-    if doc is not None:
-        mime = str(getattr(doc, "mime_type", "") or "")
-        if mime:
-            parts.append(mime)
-        for attr in getattr(doc, "attributes", []) or []:
-            fn = getattr(attr, "file_name", None)
-            if fn:
-                parts.append(str(fn))
-            alt = getattr(attr, "alt", None)
-            if alt:
-                parts.append(str(alt))
-            title = getattr(attr, "title", None)
-            if title:
-                parts.append(str(title))
-            performer = getattr(attr, "performer", None)
-            if performer:
-                parts.append(str(performer))
-
-    media = getattr(msg, "media", None)
-    wp = getattr(media, "webpage", None)
-    if wp is not None:
-        for k in ("url", "site_name", "title", "description"):
-            v = getattr(wp, k, None)
-            if v:
-                parts.append(str(v))
-
-    return "\n".join([p for p in parts if str(p).strip()])
-
-
-def _filter_haystack(msg_text: str, msg) -> str:
-    parts = [msg_text]
-    meta = _document_meta_text(msg)
-    if meta:
-        parts.append(meta)
-    return "\n".join([p for p in parts if str(p).strip()])
-
-
-def _is_gif_or_sticker(msg) -> bool:
-    if getattr(msg, "gif", None) is not None:
-        return True
-    if getattr(msg, "sticker", None) is not None:
-        return True
-
-    doc = getattr(msg, "document", None)
-    for attr in getattr(doc, "attributes", []) or []:
-        if isinstance(attr, types.DocumentAttributeSticker):
-            return True
-        if isinstance(attr, types.DocumentAttributeAnimated):
-            return True
-    return False
-
-
-def _is_video_message(msg) -> bool:
-    return bool(getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None))
-
-
-def _video_duration_seconds(msg) -> int | None:
-    doc = getattr(msg, "video", None) or getattr(msg, "video_note", None) or getattr(msg, "round_video", None)
-    if doc is None:
-        doc = getattr(msg, "document", None)
-
-    for attr in getattr(doc, "attributes", []) or []:
-        if isinstance(attr, types.DocumentAttributeVideo):
-            try:
-                return int(getattr(attr, "duration", 0) or 0)
-            except Exception:  # noqa: BLE001
-                return None
-
-    return None
-
-
-def _is_short_video(msg) -> bool:
-    if not _is_video_message(msg):
-        return False
-    dur = _video_duration_seconds(msg)
-    return dur is not None and dur < _MIN_VIDEO_DURATION_SECONDS
-
-
-def _is_photo_message(msg) -> bool:
-    if getattr(msg, "photo", None) is not None:
-        return True
-
-    doc = getattr(msg, "document", None)
-    mime = str(getattr(doc, "mime_type", "") or "")
-    if mime.startswith("image/") and not _is_video_message(msg):
-        return True
-
-    return False
-
-
-def _is_location_message(msg) -> bool:
-    media = getattr(msg, "media", None)
-    if media is None:
-        return False
-    return isinstance(media, (types.MessageMediaGeo, types.MessageMediaGeoLive, types.MessageMediaVenue))
-
-
-def _is_disallowed_document(msg) -> bool:
-    doc = getattr(msg, "document", None)
-    if doc is None:
-        return False
-
-    mime = str(getattr(doc, "mime_type", "") or "").casefold()
-    if mime in _DISALLOWED_DOC_MIMES:
-        return True
-
-    for attr in getattr(doc, "attributes", []) or []:
-        fn = getattr(attr, "file_name", None)
-        if not fn:
-            continue
-        ext = Path(str(fn)).suffix.lower()
-        if ext in _DISALLOWED_DOC_EXTS:
-            return True
-
-    return False
-
-
 # Prefix used when we cannot forward (e.g. protected content / noforwards) or when we need
 # to preserve routing metadata (source chat/topic) across a copy.
 # Relay bot will parse it and use it for routing, then strip it from outgoing captions/text.
 _SOURCE_CHAT_ID_MARKER_PREFIX = "\u2063SRC_CHAT_ID="
 _SOURCE_TOPIC_ID_MARKER_PREFIX = "\u2063SRC_TOPIC_ID="
-
-_EXTRA_BLOCKLIST_SUBSTRINGS = [
-    "正品",
-    "正版",
-    "高仿",
-    "水果",
-    "手機",
-    "emby",
-]
 
 _TWITTER_WATCH_DLQ_PATH = "logs/twitter_watch_dlq.jsonl"
 
@@ -490,7 +350,7 @@ async def _ensure_twitter_watch_routes(cfg: dict, sources: list[object]) -> bool
             if not looks_like_message_link(link):
                 continue
             try:
-                chat_id, _, topic_top = await _resolve_message_link(link)
+                chat_id, _, topic_top = await resolve_message_link(client, link)
             except Exception:  # noqa: BLE001
                 continue
             d: dict = {"chat_id": int(chat_id)}
@@ -736,17 +596,17 @@ async def handler(event):
         return
 
     msg_text = getattr(event.message, "raw_text", "") or ""
-    filter_haystack = _filter_haystack(msg_text, event.message)
+    message_haystack = filter_haystack(msg_text, event.message)
 
-    is_gif_or_sticker = _is_gif_or_sticker(event.message)
-    is_disallowed_doc = _is_disallowed_document(event.message)
-    is_location = _is_location_message(event.message)
-    is_blocked = bool(filter_haystack and _is_blocked(filter_haystack))
-    too_many_links = _has_too_many_links(msg_text)
-    is_short_video = _is_short_video(event.message)
+    has_gif_or_sticker = is_gif_or_sticker(event.message, telethon_types=types)
+    has_disallowed_doc = is_disallowed_document(event.message)
+    has_location = is_location_message(event.message, telethon_types=types)
+    blocked = bool(message_haystack and is_blocked(message_haystack, blocklist_substrings))
+    too_many_links = has_too_many_links(msg_text)
+    short_video = is_short_video(event.message, telethon_types=types)
 
     if not event.message.grouped_id:
-        if is_gif_or_sticker:
+        if has_gif_or_sticker:
             log_event(
                 logger,
                 logging.INFO,
@@ -756,7 +616,7 @@ async def handler(event):
             )
             return
 
-        if is_disallowed_doc:
+        if has_disallowed_doc:
             log_event(
                 logger,
                 logging.INFO,
@@ -766,18 +626,18 @@ async def handler(event):
             )
             return
 
-        if is_short_video:
+        if short_video:
             log_event(
                 logger,
                 logging.INFO,
                 "message_skipped_short_video",
                 chat_id=str(event.chat_id),
                 message_id=getattr(event.message, "id", None),
-                duration=_video_duration_seconds(event.message),
+                duration=video_duration_seconds(event.message, telethon_types=types),
             )
             return
 
-        if is_location:
+        if has_location:
             log_event(
                 logger,
                 logging.INFO,
@@ -797,7 +657,7 @@ async def handler(event):
             )
             return
 
-        if _is_link_only(msg_text) and not extract_tweet_urls(msg_text):
+        if is_link_only(msg_text) and not extract_tweet_urls(msg_text):
             log_event(
                 logger,
                 logging.INFO,
@@ -807,7 +667,7 @@ async def handler(event):
             )
             return
 
-        if _is_photo_message(event.message):
+        if is_photo_message(event.message):
             log_event(
                 logger,
                 logging.INFO,
@@ -817,14 +677,14 @@ async def handler(event):
             )
             return
 
-        if is_blocked or too_many_links:
+        if blocked or too_many_links:
             log_event(
                 logger,
                 logging.INFO,
                 "message_blocked",
                 chat_id=str(event.chat_id),
                 message_id=getattr(event.message, "id", None),
-                links=_count_links(msg_text) if too_many_links else None,
+                links=count_links(msg_text) if too_many_links else None,
             )
             return
 
@@ -854,7 +714,7 @@ async def handler(event):
             elif media_group_cache[key].get("source_topic_id") is None and source_topic_id is not None:
                 media_group_cache[key]["source_topic_id"] = source_topic_id
 
-            if is_gif_or_sticker or is_disallowed_doc or is_location or is_blocked or too_many_links:
+            if has_gif_or_sticker or has_disallowed_doc or has_location or blocked or too_many_links:
                 media_group_cache[key]["blocked"] = True
 
             media_group_cache[key]["messages"].append(event.message)
@@ -900,18 +760,18 @@ async def process_media_group(key: tuple[int, int]):
         "",
     )
 
-    meta_parts = [_document_meta_text(m) for m in msgs]
+    meta_parts = [document_meta_text(m) for m in msgs]
     filter_text = "\n".join([p for p in [caption_check, *meta_parts] if str(p).strip()])
 
-    if any(_is_gif_or_sticker(m) for m in msgs):
+    if any(is_gif_or_sticker(m, telethon_types=types) for m in msgs):
         log_event(logger, logging.INFO, "group_skipped_gif_or_sticker", chat_id=str(from_peer), group_id=grouped_id)
         return
 
-    if any(_is_disallowed_document(m) for m in msgs):
+    if any(is_disallowed_document(m) for m in msgs):
         log_event(logger, logging.INFO, "group_skipped_disallowed_document", chat_id=str(from_peer), group_id=grouped_id)
         return
 
-    if any(_is_short_video(m) for m in msgs):
+    if any(is_short_video(m, telethon_types=types) for m in msgs):
         log_event(
             logger,
             logging.INFO,
@@ -921,7 +781,7 @@ async def process_media_group(key: tuple[int, int]):
         )
         return
 
-    if any(_is_location_message(m) for m in msgs):
+    if any(is_location_message(m, telethon_types=types) for m in msgs):
         log_event(
             logger,
             logging.INFO,
@@ -935,26 +795,26 @@ async def process_media_group(key: tuple[int, int]):
         log_event(logger, logging.INFO, "group_skipped_attachment_only", chat_id=str(from_peer), group_id=grouped_id)
         return
 
-    if _is_link_only(caption_check) and not extract_tweet_urls(caption_check or ""):
+    if is_link_only(caption_check) and not extract_tweet_urls(caption_check or ""):
         log_event(logger, logging.INFO, "group_skipped_link_only", chat_id=str(from_peer), group_id=grouped_id)
         return
 
-    if filter_text and (_is_blocked(filter_text) or _has_too_many_links(caption_check)):
+    if filter_text and (is_blocked(filter_text, blocklist_substrings) or has_too_many_links(caption_check)):
         log_event(
             logger,
             logging.INFO,
             "group_blocked",
             chat_id=str(from_peer),
             group_id=grouped_id,
-            links=_count_links(caption_check) if _has_too_many_links(caption_check) else None,
+            links=count_links(caption_check) if has_too_many_links(caption_check) else None,
         )
         return
 
     source_topic_id = data.get("source_topic_id")
     force_copy = source_topic_id is not None
 
-    if not any(_is_video_message(m) for m in msgs):
-        photo_count = sum(1 for m in msgs if _is_photo_message(m))
+    if not any(is_video_message(m) for m in msgs):
+        photo_count = sum(1 for m in msgs if is_photo_message(m))
         if photo_count == 1:
             log_event(logger, logging.INFO, "group_skipped_single_image", chat_id=str(from_peer), group_id=grouped_id)
             return
@@ -1028,320 +888,6 @@ async def leave_chat(entity):
     await client(LeaveChannelRequest(entity))
 
 
-def _parse_destinations(tokens: list[str]) -> list[dict]:
-    out: list[dict] = []
-    for tok in tokens:
-        if not tok:
-            continue
-        if "@" in tok:
-            chat_str, topic_str = tok.split("@", 1)
-            out.append({"chat_id": int(chat_str), "topic_id": int(topic_str)})
-            continue
-        if "=" in tok:
-            chat_str, title = tok.split("=", 1)
-            title = title.strip()
-            out.append({"chat_id": int(chat_str), "topic_title": title})
-            continue
-        out.append({"chat_id": int(tok)})
-    return out
-
-
-def _format_destinations(destinations: list[dict]) -> str:
-    parts: list[str] = []
-    for d in destinations or []:
-        chat_id = d.get("chat_id")
-        if d.get("topic_id") is not None:
-            parts.append(f"{chat_id}@{d.get('topic_id')}")
-        elif d.get("topic_title"):
-            parts.append(f"{chat_id}=\"{d.get('topic_title')}\"")
-        else:
-            parts.append(str(chat_id))
-    return " ".join(parts)
-
-
-async def _resolve_message_link(link: str) -> tuple[int, int, int | None]:
-    parsed = parse_message_link(link)
-    if not parsed:
-        raise ValueError("invalid_link")
-
-    ent = await client.get_entity(parsed.chat)
-    chat_id = int(utils.get_peer_id(ent))
-
-    msg = await client.get_messages(ent, ids=int(parsed.message_id))
-    if not msg:
-        raise ValueError("message_not_found")
-
-    topic_top = _extract_source_topic_top_id(msg)
-    if topic_top is None and parsed.topic_id is not None:
-        topic_top = int(parsed.topic_id)
-
-    return chat_id, int(parsed.message_id), topic_top
-
-
-async def _build_routes_report(routes: list[dict], args: str) -> str | None:
-    entity_cache: dict[int, object] = {}
-    topic_title_cache: dict[tuple[int, int], str] = {}
-
-    async def _get_entity(chat_id: int):
-        if chat_id in entity_cache:
-            return entity_cache[chat_id]
-        ent = await client.get_entity(chat_id)
-        entity_cache[chat_id] = ent
-        return ent
-
-    def _entity_label(ent) -> str:
-        title = getattr(ent, "title", None)
-        username = getattr(ent, "username", None)
-        if title and username:
-            return f"{title} (@{username})"
-        if title:
-            return str(title)
-        if username:
-            return f"@{username}"
-        return str(getattr(ent, "id", ""))
-
-    def _internal_chat_id(chat_id: int) -> int | None:
-        # t.me/c/<internal>/<msg_id> uses chat id without the -100 prefix.
-        if str(int(chat_id)).startswith("-100"):
-            return abs(int(chat_id)) - 1000000000000
-        return None
-
-    def _chat_link(ent, chat_id: int) -> str | None:
-        username = getattr(ent, "username", None)
-        if username:
-            return f"https://t.me/{username}"
-        internal = _internal_chat_id(chat_id)
-        if internal is not None:
-            return f"https://t.me/c/{internal}/1"
-        return None
-
-    def _message_link(ent, chat_id: int, msg_id: int) -> str | None:
-        username = getattr(ent, "username", None)
-        if username:
-            return f"https://t.me/{username}/{int(msg_id)}"
-        internal = _internal_chat_id(chat_id)
-        if internal is not None:
-            return f"https://t.me/c/{internal}/{int(msg_id)}"
-        return None
-
-    async def _topic_title(chat_id: int, top_message_id: int) -> str | None:
-        if top_message_id == 1:
-            return "General"
-
-        key = (chat_id, top_message_id)
-        if key in topic_title_cache:
-            return topic_title_cache[key]
-
-        ent = await _get_entity(chat_id)
-        msg = await client.get_messages(ent, ids=int(top_message_id))
-        if not msg:
-            return None
-
-        action = getattr(msg, "action", None)
-        title = getattr(action, "title", None)
-        if not title:
-            return None
-
-        topic_title_cache[key] = str(title)
-        return str(title)
-
-    filtered = list(routes)
-    if (args or "").strip():
-        flt = parse_route_filters(args or "")
-        topic_sub = str(flt.get("topic") or "").casefold().strip() or None
-
-        base = dict(flt)
-        base["topic"] = None
-        filtered = filter_routes(list(routes), filters=base)
-
-        if topic_sub is not None:
-            matched: list[dict] = []
-            for r in filtered:
-                ok = False
-                for d in (r.get("destinations") or []):
-                    if topic_sub in str(d.get("topic_title") or "").casefold():
-                        ok = True
-                        break
-
-                    if d.get("topic_id") is not None and d.get("chat_id") is not None:
-                        try:
-                            title = await _topic_title(int(d.get("chat_id")), int(d.get("topic_id")))
-                        except Exception:  # noqa: BLE001
-                            title = None
-                        if title and topic_sub in str(title).casefold():
-                            ok = True
-                            break
-
-                if ok:
-                    matched.append(r)
-            filtered = matched
-
-    if not filtered:
-        return None
-
-    keep = {id(r) for r in filtered}
-
-    out: list[str] = [f"🤖 Routes ({len(filtered)}/{len(routes)}):"]
-    if (args or "").strip():
-        out.append(f"Filters: {args}")
-    out.append("Tip: use /export_routes to always download a file.")
-
-    for idx, r in enumerate(routes, start=1):
-        if id(r) not in keep:
-            continue
-
-        out.append(f"\n{idx})")
-
-        source_chats = [int(x) for x in (r.get("source_chats") or [])]
-        source_topics = [int(x) for x in (r.get("source_topics") or [])]
-        destinations = list(r.get("destinations") or [])
-
-        out.append("  Sources:")
-        for cid in source_chats:
-            ent = None
-            label = None
-            url = None
-            try:
-                ent = await _get_entity(cid)
-                label = _entity_label(ent)
-                url = _chat_link(ent, cid)
-            except Exception:  # noqa: BLE001
-                ent = None
-
-            line = f"    - {cid}"
-            if label:
-                line += f" | {label}"
-            if url:
-                line += f" | {url}"
-            out.append(line)
-
-            if source_topics:
-                topic_parts: list[str] = []
-                for tid in source_topics:
-                    try:
-                        title = await _topic_title(cid, tid)
-                    except Exception:  # noqa: BLE001
-                        title = None
-                    part = str(tid)
-                    if title:
-                        part += f" | {title}"
-
-                    if ent is not None:
-                        turl = _message_link(ent, cid, tid)
-                        if turl:
-                            part += f" | {turl}"
-
-                    topic_parts.append(part)
-                out.append("      topics: " + "; ".join(topic_parts))
-            else:
-                try:
-                    ent2 = ent or (entity_cache.get(cid) or await _get_entity(cid))
-                    if getattr(ent2, "forum", False):
-                        out.append("      topics: ALL")
-                except Exception:  # noqa: BLE001
-                    pass
-
-        out.append("  Destinations:")
-        for d in destinations:
-            chat_id = int(d.get("chat_id"))
-            ent = None
-            chat_label = None
-            chat_url = None
-            try:
-                ent = await _get_entity(chat_id)
-                chat_label = _entity_label(ent)
-                chat_url = _chat_link(ent, chat_id)
-            except Exception:  # noqa: BLE001
-                ent = None
-
-            line = f"    - {chat_id}"
-            if chat_label:
-                line += f" | {chat_label}"
-            if chat_url:
-                line += f" | {chat_url}"
-
-            if d.get("topic_id") is not None:
-                topic_id = int(d.get("topic_id"))
-                topic_label = None
-                try:
-                    topic_label = await _topic_title(chat_id, topic_id)
-                except Exception:  # noqa: BLE001
-                    topic_label = None
-
-                line += f" | topic_id={topic_id}"
-                if topic_label:
-                    line += f" | {topic_label}"
-                if ent is not None:
-                    turl = _message_link(ent, chat_id, topic_id)
-                    if turl:
-                        line += f" | {turl}"
-            elif d.get("topic_title"):
-                line += f" | topic_title=\"{d.get('topic_title')}\""
-
-            out.append(line)
-
-    return "\n".join(out)
-
-
-async def _normalize_routes_filter_args(event, args: str) -> str | None:
-    tokens = shlex.split(args or "")
-    if not tokens:
-        return (args or "").strip()
-
-    dest_ids: list[int] = []
-    topic_top: int | None = None
-    topic_title: str | None = None
-    keep: list[str] = []
-
-    for tok in tokens:
-        if looks_like_message_link(tok):
-            try:
-                chat_id, _, top = await _resolve_message_link(tok)
-            except Exception as exc:  # noqa: BLE001
-                await event.reply(f"🤖 错误: 无法解析链接: {tok} ({type(exc).__name__})")
-                return None
-
-            dest_ids.append(int(chat_id))
-
-            if top is not None and topic_top is None:
-                topic_top = int(top)
-
-                if topic_top == 1:
-                    topic_title = "General"
-                else:
-                    try:
-                        ent = await client.get_entity(int(chat_id))
-                        msg = await client.get_messages(ent, ids=int(topic_top))
-                        action = getattr(msg, "action", None) if msg else None
-                        title = getattr(action, "title", None) if action else None
-                        if title:
-                            topic_title = str(title)
-                    except Exception:  # noqa: BLE001
-                        topic_title = None
-
-            continue
-
-        keep.append(tok)
-
-    if dest_ids:
-        seen: set[int] = set()
-        uniq: list[int] = []
-        for d in dest_ids:
-            if d in seen:
-                continue
-            seen.add(d)
-            uniq.append(d)
-        keep.append("dest=" + ",".join(str(x) for x in uniq))
-
-    # Prefer filtering by resolved topic title (works for both topic_id and topic_title routes).
-    if topic_title:
-        keep.append("topic=" + shlex.quote(topic_title))
-    elif topic_top is not None:
-        keep.append(f"topic_id={int(topic_top)}")
-
-    return " ".join([x for x in keep if str(x).strip()]).strip()
-
-
 async def _cmd_list_routes(event, args: str = ""):
     cfg = config_manager.load(force=True)
     relay = cfg.get("relay", {}) or {}
@@ -1350,11 +896,11 @@ async def _cmd_list_routes(event, args: str = ""):
         await event.reply("🤖 routes 为空")
         return
 
-    args2 = await _normalize_routes_filter_args(event, args)
+    args2 = await normalize_routes_filter_args(client, event, args)
     if args2 is None:
         return
 
-    text = await _build_routes_report(list(routes), args2)
+    text = await build_routes_report(client, list(routes), args2)
     if not text:
         await event.reply(
             "🤖 未匹配到 routes。用法: /list_routes [source=..] [dest=..] [topic=..] [topic_id=..] [free_text..]\n"
@@ -1384,11 +930,11 @@ async def _cmd_export_routes(event, args: str = ""):
         await event.reply("🤖 routes 为空")
         return
 
-    args2 = await _normalize_routes_filter_args(event, args)
+    args2 = await normalize_routes_filter_args(client, event, args)
     if args2 is None:
         return
 
-    text = await _build_routes_report(list(routes), args2)
+    text = await build_routes_report(client, list(routes), args2)
     if not text:
         await event.reply("🤖 未匹配到 routes。")
         return
@@ -1422,13 +968,13 @@ async def _cmd_add_route(event, args: str):
     source_token = tokens[0]
 
     if looks_like_message_link(source_token):
-        src_chat_id, _, src_topic = await _resolve_message_link(source_token)
+        src_chat_id, _, src_topic = await resolve_message_link(client, source_token)
 
         destinations: list[dict] = []
         non_link_dest_tokens: list[str] = []
         for t in tokens[1:]:
             if looks_like_message_link(t):
-                chat_id, _, topic_top = await _resolve_message_link(t)
+                chat_id, _, topic_top = await resolve_message_link(client, t)
                 dest: dict = {"chat_id": int(chat_id)}
                 if topic_top is not None:
                     dest["topic_id"] = int(topic_top)
@@ -1436,7 +982,7 @@ async def _cmd_add_route(event, args: str):
             else:
                 non_link_dest_tokens.append(t)
 
-        destinations.extend(_parse_destinations(non_link_dest_tokens))
+        destinations.extend(parse_destinations_tokens(non_link_dest_tokens))
 
         if not destinations:
             await event.reply("🤖 错误: destinations 为空")
@@ -1469,7 +1015,7 @@ async def _cmd_add_route(event, args: str):
     non_link_dest_tokens: list[str] = []
     for t in dest_tokens:
         if looks_like_message_link(t):
-            chat_id, _, topic_top = await _resolve_message_link(t)
+            chat_id, _, topic_top = await resolve_message_link(client, t)
             dest: dict = {"chat_id": int(chat_id)}
             if topic_top is not None:
                 dest["topic_id"] = int(topic_top)
@@ -1477,7 +1023,7 @@ async def _cmd_add_route(event, args: str):
         else:
             non_link_dest_tokens.append(t)
 
-    destinations.extend(_parse_destinations(non_link_dest_tokens))
+    destinations.extend(parse_destinations_tokens(non_link_dest_tokens))
     if not destinations:
         await event.reply("🤖 错误: destinations 为空")
         return
@@ -1531,7 +1077,7 @@ async def _cmd_set_destinations(event, args: str):
     non_link_tokens: list[str] = []
     for t in tokens[1:]:
         if looks_like_message_link(t):
-            chat_id, _, topic_top = await _resolve_message_link(t)
+            chat_id, _, topic_top = await resolve_message_link(client, t)
             dest: dict = {"chat_id": int(chat_id)}
             if topic_top is not None:
                 dest["topic_id"] = int(topic_top)
@@ -1539,7 +1085,7 @@ async def _cmd_set_destinations(event, args: str):
         else:
             non_link_tokens.append(t)
 
-    destinations.extend(_parse_destinations(non_link_tokens))
+    destinations.extend(parse_destinations_tokens(non_link_tokens))
 
     cfg = config_manager.load(force=True)
     relay = cfg.get("relay", {}) or {}
@@ -1946,7 +1492,7 @@ async def main():
                 for t in dest_tokens:
                     if looks_like_message_link(t):
                         try:
-                            chat_id, _, topic_top = await _resolve_message_link(t)
+                            chat_id, _, topic_top = await resolve_message_link(client, t)
                         except Exception as exc:  # noqa: BLE001
                             await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
                             return
@@ -1983,7 +1529,7 @@ async def main():
                 for t in positional:
                     if looks_like_message_link(t):
                         try:
-                            chat_id, _, topic_top = await _resolve_message_link(t)
+                            chat_id, _, topic_top = await resolve_message_link(client, t)
                         except Exception as exc:  # noqa: BLE001
                             await event.reply(f"🤖 错误: 无法解析链接: {t} ({type(exc).__name__})")
                             return
@@ -2012,7 +1558,7 @@ async def main():
                 await event.reply(f"🤖 无法解析 bot: {type(exc).__name__}: {exc}")
                 return
 
-            destinations.extend(_parse_destinations(non_link_dest_tokens))
+            destinations.extend(parse_destinations_tokens(non_link_dest_tokens))
             destinations = _dedupe_destinations(destinations)
 
             new_entry: dict = {
@@ -2073,7 +1619,7 @@ async def main():
                 await event.reply(
                     "🤖 已添加 twitter_watch source，并已添加/更新 route。\n"
                     f"profile={profile} | source_chat_id={source_chat_id} | target_bot={bot} | interval={new_entry['poll_interval_sec']}s | fetch_limit={new_entry['fetch_limit']}\n"
-                    f"destinations={_format_destinations(destinations)}"
+                    f"destinations={format_destinations(destinations)}"
                 )
             else:
                 await event.reply(

@@ -76,7 +76,7 @@ class TestRelayBotTweetExpansion(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.calls), 1)
         self.assertEqual(client.calls[0][0], "send_file")
         self.assertEqual(client.calls[0][1], -100)
-        self.assertEqual(client.calls[0][2], ["F1", "F2"])
+        self.assertEqual(client.calls[0][2], ["F1.jpg", "F2.jpg"])
 
 
 if __name__ == "__main__":
